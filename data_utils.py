@@ -60,6 +60,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df["Order_Quarter"] = df["Order_Date"].dt.quarter
     df["Order_Year"] = df["Order_Date"].dt.year
     df["Order_DayOfWeek"] = df["Order_Date"].dt.dayofweek
+    df["Order_YearMonth"] = df["Order_Date"].dt.to_period("M").astype(str)
 
     df["Schedule_Buffer_Days"] = df["Scheduled_Lead_Time_Days"] - df["Base_Lead_Time_Days"]
     df["Schedule_Buffer_Ratio"] = (
