@@ -132,60 +132,157 @@ tab_overview, tab_map, tab_explorer, tab_scorer, tab_explain, tab_ailab = st.tab
 # ============================== OVERVIEW ==================================
 with tab_overview:
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Shipments (filtered)", f"{len(fdf):,}")
-    c2.metric("Actual Delay Rate", f"{fdf['Is_Delayed'].mean()*100:.1f}%")
-    c3.metric("Avg Risk Score", f"{fdf['Shipment_Risk_Score'].mean():.1f}")
-    c4.metric("High + Severe Tier", f"{(fdf['Risk_Tier'].isin(['High','Severe'])).mean()*100:.1f}%")
+    c1.metric("📦 Shipments (filtered)", f"{len(fdf):,}")
+    c2.metric("⏱️ Actual Delay Rate", f"{fdf['Is_Delayed'].mean()*100:.1f}%")
+    c3.metric("🎯 Avg Risk Score", f"{fdf['Shipment_Risk_Score'].mean():.1f} / 100")
+    c4.metric("🔥 High + Severe Tier", f"{(fdf['Risk_Tier'].isin(['High','Severe'])).mean()*100:.1f}%")
 
-    st.markdown("#### Risk Tier Distribution")
-    tier_counts = fdf["Risk_Tier"].value_counts().reindex(["Low", "Medium", "High", "Severe"]).fillna(0)
-    fig = go.Figure(go.Bar(
-        x=tier_counts.index, y=tier_counts.values,
-        marker_color=[TIER_COLORS[t] for t in tier_counts.index],
-        text=tier_counts.values, textposition="outside",
-    ))
-    fig.update_layout(
-        template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
-        height=350, margin=dict(t=10, b=10),
-    )
-    st.plotly_chart(fig, width='stretch')
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown("#### Delay Rate by Transportation Mode")
-        rate_mode = fdf.groupby("Transportation_Mode")["Is_Delayed"].mean().sort_values(ascending=False)
-        fig = px.bar(x=rate_mode.values, y=rate_mode.index, orientation="h",
-                      color=rate_mode.values, color_continuous_scale="Teal")
-        fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
-                           height=320, showlegend=False, coloraxis_showscale=False,
-                           xaxis_title="Delay Rate", yaxis_title="")
-        st.plotly_chart(fig, width='stretch')
-    with col_b:
-        st.markdown("#### Delay Rate by Product Category")
-        rate_cat = fdf.groupby("Product_Category")["Is_Delayed"].mean().sort_values(ascending=False)
-        fig = px.bar(x=rate_cat.values, y=rate_cat.index, orientation="h",
-                      color=rate_cat.values, color_continuous_scale="Oranges")
-        fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
-                           height=320, showlegend=False, coloraxis_showscale=False,
-                           xaxis_title="Delay Rate", yaxis_title="")
-        st.plotly_chart(fig, width='stretch')
+    with st.container(border=True):
+        col_donut, col_calib = st.columns([1, 1.4])
+        with col_donut:
+            st.markdown("##### 🍩 Risk Tier Split")
+            tier_counts = fdf["Risk_Tier"].value_counts().reindex(["Low", "Medium", "High", "Severe"]).fillna(0)
+            fig = go.Figure(go.Pie(
+                labels=tier_counts.index, values=tier_counts.values, hole=0.58,
+                marker=dict(colors=[TIER_COLORS[t] for t in tier_counts.index]),
+                textinfo="label+percent", textfont=dict(color="#e5e7eb", size=12),
+            ))
+            fig.update_layout(
+                template="plotly_dark", paper_bgcolor="#111827", height=330,
+                showlegend=False, margin=dict(t=10, b=10, l=10, r=10),
+                annotations=[dict(text=f"{len(fdf):,}<br>shipments", x=0.5, y=0.5,
+                                   font_size=15, showarrow=False, font_color="#e5e7eb")],
+            )
+            st.plotly_chart(fig, width="stretch")
+        with col_calib:
+            st.markdown("##### ✅ Calibration Check — Score vs Reality")
+            calib = fdf.groupby("Risk_Tier")["Is_Delayed"].mean().reindex(["Low", "Medium", "High", "Severe"])
+            fig = go.Figure(go.Bar(
+                x=calib.index, y=calib.values * 100,
+                marker_color=[TIER_COLORS[t] for t in calib.index],
+                text=[f"{v*100:.1f}%" for v in calib.values], textposition="outside",
+            ))
+            fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
+                               height=330, yaxis_title="Actual Delay Rate (%)", margin=dict(t=10, b=10))
+            st.plotly_chart(fig, width="stretch")
+            st.caption("Each tier's actual delay rate should climb monotonically left to right — that's what confirms the score is well-calibrated, not just confident.")
 
-    st.markdown("#### Risk Tier Calibration Check")
-    calib = fdf.groupby("Risk_Tier")["Is_Delayed"].mean().reindex(["Low", "Medium", "High", "Severe"])
-    fig = go.Figure(go.Bar(
-        x=calib.index, y=calib.values * 100,
-        marker_color=[TIER_COLORS[t] for t in calib.index],
-        text=[f"{v*100:.1f}%" for v in calib.values], textposition="outside",
-    ))
-    fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
-                       height=320, yaxis_title="Actual Delay Rate (%)", margin=dict(t=10, b=10))
-    st.plotly_chart(fig, width='stretch')
-    st.caption("Each tier's actual delay rate should increase monotonically — confirming the score is well-calibrated, not just confident.")
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown("##### 🌊 Shipment Flow: Mode → Route → Risk Outcome")
+        st.caption("Sankey diagram — band thickness = shipment volume. Follow a band to see how shipments on a given mode/route tend to resolve.")
+
+        sankey_df = fdf.groupby(["Transportation_Mode", "Route_Type", "Risk_Tier"]).size().reset_index(name="count")
+        sankey_df = sankey_df[sankey_df["count"] > 0]
+
+        modes_u = sorted(fdf["Transportation_Mode"].unique())
+        routes_u = sorted(fdf["Route_Type"].unique())
+        tiers_u = ["Low", "Medium", "High", "Severe"]
+
+        node_labels = modes_u + routes_u + tiers_u
+        node_colors = (
+            ["#5b8def"] * len(modes_u)
+            + ["#9b59b6"] * len(routes_u)
+            + [TIER_COLORS[t] for t in tiers_u]
+        )
+
+        sources, targets, values, link_colors = [], [], [], []
+        mode_route = fdf.groupby(["Transportation_Mode", "Route_Type"]).size().reset_index(name="count")
+        for _, r in mode_route.iterrows():
+            sources.append(modes_u.index(r["Transportation_Mode"]))
+            targets.append(len(modes_u) + routes_u.index(r["Route_Type"]))
+            values.append(r["count"])
+            link_colors.append("rgba(91,141,239,0.35)")
+        for _, r in sankey_df.iterrows():
+            sources.append(len(modes_u) + routes_u.index(r["Route_Type"]))
+            targets.append(len(modes_u) + len(routes_u) + tiers_u.index(r["Risk_Tier"]))
+            values.append(r["count"])
+            link_colors.append("rgba(155,89,182,0.35)")
+
+        fig = go.Figure(go.Sankey(
+            node=dict(label=node_labels, color=node_colors, pad=18, thickness=16,
+                      line=dict(color="#0b0f19", width=0.5)),
+            link=dict(source=sources, target=targets, value=values, color=link_colors),
+        ))
+        fig.update_layout(template="plotly_dark", paper_bgcolor="#111827", height=420,
+                           margin=dict(t=10, b=10, l=10, r=10),
+                           font=dict(color="#e5e7eb", size=12))
+        st.plotly_chart(fig, width="stretch")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    col_tree, col_mode = st.columns([1.3, 1])
+    with col_tree:
+        with st.container(border=True):
+            st.markdown("##### 🗂️ Product Category Risk Map")
+            st.caption("Box size = shipment volume · Color = delay rate")
+            cat_agg = fdf.groupby("Product_Category").agg(
+                volume=("Product_Category", "count"), delay_rate=("Is_Delayed", "mean"),
+            ).reset_index()
+            fig = px.treemap(
+                cat_agg, path=["Product_Category"], values="volume",
+                color="delay_rate", color_continuous_scale="RdYlGn_r",
+                custom_data=["delay_rate"],
+            )
+            fig.update_traces(
+                texttemplate="<b>%{label}</b><br>%{value} shipments<br>%{customdata[0]:.1%} delayed",
+                textfont_size=13,
+            )
+            fig.update_layout(template="plotly_dark", paper_bgcolor="#111827", height=380,
+                               margin=dict(t=10, b=10, l=10, r=10), coloraxis_showscale=False)
+            st.plotly_chart(fig, width="stretch")
+
+    with col_mode:
+        with st.container(border=True):
+            st.markdown("##### 🚢 Delay Rate by Mode")
+            rate_mode = fdf.groupby("Transportation_Mode")["Is_Delayed"].mean().sort_values(ascending=False)
+            fig = px.bar(x=rate_mode.values, y=rate_mode.index, orientation="h",
+                          color=rate_mode.values, color_continuous_scale="Teal")
+            fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
+                               height=380, showlegend=False, coloraxis_showscale=False,
+                               xaxis_title="Delay Rate", yaxis_title="", margin=dict(t=10, b=10))
+            st.plotly_chart(fig, width="stretch")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown("##### 📈 Delay Rate Trend Over Time")
+        st.caption("Line = actual delay rate per month · Bars = shipment volume per month")
+        trend = fdf.groupby("Order_YearMonth").agg(
+            delay_rate=("Is_Delayed", "mean"), volume=("Is_Delayed", "count"),
+        ).reset_index().sort_values("Order_YearMonth")
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=trend["Order_YearMonth"], y=trend["volume"], name="Shipment Volume",
+            marker_color="rgba(91,141,239,0.35)", yaxis="y2",
+        ))
+        fig.add_trace(go.Scatter(
+            x=trend["Order_YearMonth"], y=trend["delay_rate"] * 100, name="Delay Rate (%)",
+            mode="lines+markers", line=dict(color="#ef4444", width=2.5), marker=dict(size=6),
+        ))
+        fig.update_layout(
+            template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
+            height=380, margin=dict(t=10, b=10),
+            yaxis=dict(title="Delay Rate (%)"),
+            yaxis2=dict(title="Volume", overlaying="y", side="right", showgrid=False),
+            legend=dict(orientation="h", y=1.12),
+        )
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Watch for months where delay rate spikes independent of volume — that points to a period effect (seasonality, geopolitical event) rather than simple congestion from more shipments.")
 
 # ============================== MAP ========================================
 with tab_map:
-    st.markdown("#### Trade Lane Risk Map")
+    st.markdown("#### 🌍 Trade Lane Risk Map")
     st.caption("Line color = average predicted risk score on that lane · Line width = shipment volume")
+    st.markdown(
+        "".join([f"<span class='risk-badge {BADGE_CLASS[t]}' style='margin-right:6px;'>{t}</span>" for t in ["Low", "Medium", "High", "Severe"]]),
+        unsafe_allow_html=True,
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
 
     lane_agg = (
         fdf.groupby(["Origin_City", "Destination_City"])
@@ -240,7 +337,7 @@ with tab_map:
     )
     st.plotly_chart(fig, width='stretch')
 
-    st.markdown("##### Lane Risk Summary")
+    st.markdown("##### 🛣️ Lane Risk Summary")
     st.dataframe(
         lane_agg.assign(
             Route=lambda d: d["Origin_City"] + " → " + d["Destination_City"],
@@ -254,7 +351,7 @@ with tab_map:
 
 # ============================== EXPLORER ===================================
 with tab_explorer:
-    st.markdown("#### Shipment-Level Explorer")
+    st.markdown("#### 🔍 Shipment-Level Explorer")
     col1, col2 = st.columns([2, 1])
     with col1:
         fig = px.scatter(
@@ -271,7 +368,7 @@ with tab_explorer:
                            legend=dict(orientation="h", y=-0.1))
         st.plotly_chart(fig, width='stretch')
 
-    st.markdown("##### Highest-Risk Shipments")
+    st.markdown("##### 🔥 Highest-Risk Shipments")
     show_cols = [
         "Order_ID", "Route", "Transportation_Mode", "Product_Category",
         "Predicted_Delay_Probability", "Predicted_Delay_Days", "Shipment_Risk_Score", "Risk_Tier", "Is_Delayed",
@@ -291,7 +388,7 @@ with tab_explorer:
 
 # ============================== SCORER ======================================
 with tab_scorer:
-    st.markdown("#### Score a Hypothetical Shipment")
+    st.markdown("#### 🎯 Score a Hypothetical Shipment")
     st.caption("Simulate a shipment before it ships — the kind of check a trade-finance desk would run before underwriting it.")
 
     cities = sorted(CITY_COORDS.keys())
@@ -371,7 +468,7 @@ with tab_scorer:
             st.success("Underwriting note: this shipment profile falls in the Low/Medium risk band — standard terms are reasonable.")
 
         st.markdown("---")
-        st.markdown("##### Why this score? (SHAP explanation for this shipment)")
+        st.markdown("##### 🧠 Why This Score? (SHAP Explanation)")
         with st.spinner("Computing SHAP explanation..."):
             sv_row, feat_row, base_value = compute_single_shap({
                 "base_lead_time": base_lead, "scheduled_lead_time": sched_lead,
@@ -403,7 +500,7 @@ with tab_scorer:
         st.caption(f"Base rate (average predicted risk before considering this shipment's features): {base_value:.3f}. Bars show how each feature moved this specific shipment away from that baseline.")
 
         st.markdown("---")
-        st.markdown("##### Anomaly Check (Isolation Forest)")
+        st.markdown("##### 🚨 Anomaly Check (Isolation Forest)")
         st.caption("Independent of the risk score — flags shipments whose feature combination is statistically unusual (e.g. an oddly cheap or oddly heavy shipment for its category), which can matter for quality/fraud review even on shipments the risk model considers low-risk.")
 
         @st.cache_resource(show_spinner="Fitting anomaly detector...")
@@ -434,7 +531,7 @@ with tab_scorer:
 
 # ============================== EXPLAINABILITY ===============================
 with tab_explain:
-    st.markdown("#### Why the Model Flags Risk the Way It Does")
+    st.markdown("#### 🧠 Why the Model Flags Risk the Way It Does")
     st.caption("SHAP (SHapley Additive exPlanations) values computed live from the trained classifier — not a static image, so this always matches the model actually running.")
 
     @st.cache_data(show_spinner="Computing SHAP values...")
@@ -461,7 +558,7 @@ with tab_explain:
     )
     st.plotly_chart(fig, width="stretch")
 
-    st.markdown("##### Distribution of Impact (Beeswarm)")
+    st.markdown("##### 🐝 Distribution of Impact (Beeswarm)")
     st.caption("Each dot is one shipment. Position = SHAP value (pushes risk up or down). Color = whether that feature's value was high (red) or low (blue) for that shipment.")
 
     top_n = 12
@@ -505,7 +602,7 @@ with tab_explain:
 
 # ============================== ADVANCED AI LAB ===============================
 with tab_ailab:
-    st.markdown("#### Beyond the Core Model: Unsupervised & Simulation Techniques")
+    st.markdown("#### 🤖 Beyond the Core Model: Unsupervised & Simulation Techniques")
     st.caption("These sections use different ML techniques than the classifier/regressor above — unsupervised anomaly detection, unsupervised clustering, and Monte Carlo simulation — to surface patterns the supervised risk score alone doesn't show.")
 
     lab_anomaly, lab_cluster, lab_montecarlo = st.tabs(
@@ -514,7 +611,7 @@ with tab_ailab:
 
     # --- Anomaly Detection sub-tab ---
     with lab_anomaly:
-        st.markdown("##### Isolation Forest — Unusual Shipment Detection")
+        st.markdown("##### 🌲 Isolation Forest — Unusual Shipment Detection")
         st.caption("Unsupervised — doesn't use the delay label at all. Flags shipments whose cost/weight/lead-time/risk-index combination is statistically unusual relative to the rest of the portfolio. Deliberately independent of the risk score: a shipment can be Low risk-tier and still get flagged here.")
 
         @st.cache_data(show_spinner="Fitting Isolation Forest...")
@@ -540,7 +637,7 @@ with tab_ailab:
         fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827", height=440)
         st.plotly_chart(fig, width="stretch")
 
-        st.markdown("###### Top Flagged Shipments")
+        st.markdown("###### 🚩 Top Flagged Shipments")
         show_cols = ["Order_ID", "Route", "Transportation_Mode", "Product_Category", "Cost_Per_Kg", "Shipment_Risk_Score", "Risk_Tier", "Anomaly_Score"]
         st.dataframe(
             adf_f[adf_f["Is_Anomaly"]].sort_values("Anomaly_Score", ascending=False)[show_cols].head(50),
@@ -549,7 +646,7 @@ with tab_ailab:
 
     # --- Clustering sub-tab ---
     with lab_cluster:
-        st.markdown("##### K-Means Risk Archetypes")
+        st.markdown("##### 🧬 K-Means Risk Archetypes")
         st.caption("Unsupervised segmentation on cost, weight, lead time, and risk-index features (not on the delay label). Reveals natural portfolio groupings a trade-finance desk could price or monitor differently.")
 
         n_clusters = st.slider("Number of archetypes", 3, 8, 5)
@@ -561,7 +658,7 @@ with tab_ailab:
         cdf, profile = _clusters(n_clusters)
         cdf_f = cdf.loc[cdf.index.isin(fdf.index)]
 
-        st.markdown("###### Archetype Profiles")
+        st.markdown("###### 📋 Archetype Profiles")
         display_profile = profile.copy()
         display_profile["avg_risk_score"] = display_profile["avg_risk_score"].round(1)
         display_profile["delay_rate"] = (display_profile["delay_rate"] * 100).round(1)
@@ -573,7 +670,7 @@ with tab_ailab:
             width="stretch", hide_index=True,
         )
 
-        st.markdown("###### Cluster Map (PCA Projection)")
+        st.markdown("###### 🗺️ Cluster Map (PCA Projection)")
         fig = px.scatter(
             cdf_f, x="PCA_1", y="PCA_2", color=cdf_f["Cluster"].astype(str),
             hover_data=["Transportation_Mode", "Product_Category", "Shipment_Risk_Score"],
@@ -584,9 +681,49 @@ with tab_ailab:
         st.plotly_chart(fig, width="stretch")
         st.caption("Each point is one shipment, projected from 7 numeric features down to 2D via PCA. Distinct clusters here mean the underlying feature combinations are genuinely different, not just relabeled risk tiers.")
 
+        st.markdown("###### 🕸️ Archetype Comparison (Radar)")
+        st.caption("Each axis normalized 0-1 across archetypes, so shapes are directly comparable regardless of original units.")
+
+        radar_dims = ["avg_cost_per_kg", "avg_risk_score", "delay_rate"]
+        radar_extra = cdf.groupby("Cluster").agg(
+            avg_base_lead=("Base_Lead_Time_Days", "mean"),
+            avg_geo_risk=("Geopolitical_Risk_Index", "mean"),
+        ).reset_index()
+        radar_profile = profile.merge(radar_extra, on="Cluster")
+
+        radar_cols = {
+            "avg_cost_per_kg": "Cost/kg",
+            "avg_base_lead": "Lead Time",
+            "avg_geo_risk": "Geo Risk",
+            "delay_rate": "Delay Rate",
+            "avg_risk_score": "Risk Score",
+        }
+        norm_df = radar_profile.copy()
+        for col in radar_cols:
+            rng = norm_df[col].max() - norm_df[col].min()
+            norm_df[col] = (norm_df[col] - norm_df[col].min()) / rng if rng > 0 else 0.5
+
+        fig = go.Figure()
+        palette = px.colors.qualitative.Set2
+        for i, row in norm_df.iterrows():
+            fig.add_trace(go.Scatterpolar(
+                r=[row[c] for c in radar_cols] + [row[list(radar_cols)[0]]],
+                theta=list(radar_cols.values()) + [list(radar_cols.values())[0]],
+                fill="toself", name=f"Cluster {int(row['Cluster'])}",
+                line=dict(color=palette[i % len(palette)]),
+                opacity=0.5,
+            ))
+        fig.update_layout(
+            template="plotly_dark", paper_bgcolor="#111827", height=460,
+            polar=dict(bgcolor="#111827", radialaxis=dict(visible=True, range=[0, 1], showticklabels=False)),
+            legend=dict(orientation="h", y=-0.1),
+            margin=dict(t=20, b=10),
+        )
+        st.plotly_chart(fig, width="stretch")
+
     # --- Monte Carlo sub-tab ---
     with lab_montecarlo:
-        st.markdown("##### Portfolio Exposure Simulation")
+        st.markdown("##### 🎲 Portfolio Exposure Simulation")
         st.caption("Treats each shipment's predicted delay probability as an independent Bernoulli trial and simulates the filtered portfolio thousands of times — a lightweight, VaR-style view of tail risk, not just the average case.")
 
         n_sims = st.select_slider("Number of simulations", options=[500, 1000, 2000, 5000], value=2000)
