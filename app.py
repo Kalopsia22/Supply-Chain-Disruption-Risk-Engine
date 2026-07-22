@@ -14,6 +14,14 @@ from data_utils import (
     compute_anomaly_scores, score_single_anomaly, compute_clusters,
     monte_carlo_portfolio, generate_underwriting_memo,
 )
+from dl_model import score_single_shipment_dl
+from weather_api import fetch_port_conditions, classify_conditions
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+    AUTOREFRESH_AVAILABLE = True
+except ImportError:
+    AUTOREFRESH_AVAILABLE = False
 
 st.set_page_config(
     page_title="Supply Chain Risk Engine",
@@ -125,8 +133,8 @@ st.sidebar.markdown(
 # ---------------------------------------------------------------------------
 # TABS
 # ---------------------------------------------------------------------------
-tab_overview, tab_map, tab_explorer, tab_scorer, tab_explain, tab_ailab = st.tabs(
-    ["📊 Portfolio Overview", "🌍 Global Risk Map", "🔍 Risk Explorer", "🎯 Shipment Risk Scorer", "🧠 Model Explainability", "🤖 Advanced AI Lab"]
+tab_overview, tab_map, tab_explorer, tab_scorer, tab_explain, tab_ailab, tab_live = st.tabs(
+    ["📊 Portfolio Overview", "🌍 Global Risk Map", "🔍 Risk Explorer", "🎯 Shipment Risk Scorer", "🧠 Model Explainability", "🤖 Advanced AI Lab", "🛰️ Live Port Conditions"]
 )
 
 # ============================== OVERVIEW ==================================
@@ -455,6 +463,45 @@ with tab_scorer:
             f"<div style='margin-top:8px;'>Risk Tier: <span class='risk-badge {badge_cls}'>{result['risk_tier'].upper()}</span></div>",
             unsafe_allow_html=True,
         )
+
+        st.markdown("---")
+        st.markdown("##### 🧠 Deep Learning Cross-Check (PyTorch)")
+        st.caption("A second, independently-trained model — a neural net with learned embeddings for route/mode/category — scoring the same shipment. Large disagreement between the two models is itself a useful signal.")
+
+        dl_inputs = {
+            "base_lead_time": base_lead, "scheduled_lead_time": sched_lead,
+            "geo_risk": geo_risk, "weather_risk": weather_risk, "inflation": inflation,
+            "shipping_cost": shipping_cost, "order_weight": order_weight,
+            "order_month": order_month, "day_of_week": day_of_week,
+            "origin": origin, "destination": destination, "route_type": route_type,
+            "mode": mode, "category": category,
+        }
+        try:
+            dl_result = score_single_shipment_dl(dl_inputs)
+            dl_prob = dl_result["probability"]
+            diff = abs(dl_prob - result["probability"])
+
+            colD1, colD2, colD3 = st.columns(3)
+            colD1.metric("XGBoost (Gradient Boosting)", f"{result['probability']*100:.1f}%")
+            colD2.metric("Deep Neural Net (PyTorch)", f"{dl_prob*100:.1f}%")
+            if diff < 0.15:
+                colD3.metric("Agreement", "✅ Close")
+            elif diff < 0.40:
+                colD3.metric("Agreement", "⚠️ Some Disagreement")
+            else:
+                colD3.metric("Agreement", "🚨 High Disagreement")
+
+            if diff >= 0.40:
+                st.warning(
+                    "These two independently-trained models disagree substantially on this shipment. "
+                    "That can happen when an input sits in a region the training data doesn't pin down "
+                    "clearly (e.g. an unusual combination of lead time and cost for that route), or simply "
+                    "because tree-based and neural-network models generalize differently at the edges of "
+                    "their training distribution. Either way, treat this specific prediction with more "
+                    "caution than usual and consider a manual review rather than trusting either number alone."
+                )
+        except FileNotFoundError:
+            st.info("Deep learning model files not found — run `python dl_model.py` to train and save the PyTorch model first.")
 
         fig = go.Figure(go.Indicator(
             mode="gauge+number",
@@ -813,8 +860,90 @@ with tab_ailab:
                 """
             )
 
+# ============================== LIVE PORT CONDITIONS ===============================
+with tab_live:
+    st.markdown("#### 🛰️ Live Port Conditions")
+    st.caption("Real marine weather from Open-Meteo (free, no API key) — current wave height, wind, and a 7-day hourly forecast per port. Updates on a live basis, not from the static dataset.")
+
+    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.4, 1, 1])
+    with col_ctrl1:
+        refresh_minutes = st.select_slider("Auto-refresh every", options=[1, 5, 10, 15, 30], value=10, format_func=lambda m: f"{m} min")
+    with col_ctrl2:
+        auto_on = st.toggle("Auto-refresh", value=False)
+    with col_ctrl3:
+        manual_refresh = st.button("🔄 Refresh Now")
+
+    if auto_on:
+        if AUTOREFRESH_AVAILABLE:
+            st_autorefresh(interval=refresh_minutes * 60 * 1000, key="live_conditions_refresh")
+        else:
+            st.warning("Install `streamlit-autorefresh` (already in requirements.txt) to enable automatic refresh; using manual refresh for now.")
+
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _cached_port_conditions(port_name, lat, lon, _cache_bust):
+        return fetch_port_conditions(lat, lon)
+
+    if manual_refresh:
+        _cached_port_conditions.clear()
+
+    import datetime
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    fetch_time_bucket = now_utc.strftime("%Y%m%d%H%M") if manual_refresh else now_utc.strftime("%Y%m%d%H")
+
+    st.markdown(f"<span class='small-caption'>Last fetched (UTC, rounded to cache window): {now_utc.strftime('%Y-%m-%d %H:%M')}</span>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    selected_port = st.selectbox("Select a port", sorted(CITY_COORDS.keys()))
+    lat, lon = CITY_COORDS[selected_port]
+
+    with st.spinner(f"Fetching live conditions for {selected_port}..."):
+        conditions = _cached_port_conditions(selected_port, lat, lon, fetch_time_bucket)
+
+    if not conditions.get("ok"):
+        st.error(
+            f"Could not fetch live data for {selected_port}: {conditions.get('error', 'unknown error')}. "
+            "If this persists, check that your Streamlit Cloud deployment has outbound internet access to "
+            "api.open-meteo.com and marine-api.open-meteo.com."
+        )
+    else:
+        classification = classify_conditions(conditions["current_wave_height_m"], conditions["current_wind_kmh"])
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("🌊 Current Wave Height", f"{conditions['current_wave_height_m']:.1f} m" if conditions["current_wave_height_m"] is not None else "n/a")
+        c2.metric("💨 Current Wind Speed", f"{conditions['current_wind_kmh']:.0f} km/h" if conditions["current_wind_kmh"] is not None else "n/a")
+        c3.metric("📈 Peak Wave (next 72h)", f"{conditions['peak_wave_72h_m']:.1f} m" if conditions["peak_wave_72h_m"] is not None else "n/a")
+        c4.metric("📈 Peak Wind (next 72h)", f"{conditions['peak_wind_72h_kmh']:.0f} km/h" if conditions["peak_wind_72h_kmh"] is not None else "n/a")
+
+        st.markdown(
+            f"<span class='risk-badge' style='background: {classification['color']}22; color: {classification['color']}; border: 1px solid {classification['color']};'>{classification['level']}</span>",
+            unsafe_allow_html=True,
+        )
+        st.caption("Classification uses standard maritime wave-height/wind operational thresholds (Douglas sea state / Beaufort scale bands), not a trained model — this is a transparent rule, not a black box.")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("##### 7-Day Hourly Forecast")
+        fc = conditions["df"]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=fc["time"], y=fc["wave_height_m"], name="Wave Height (m)",
+                                   line=dict(color="#2dd4bf", width=2)))
+        fig.add_trace(go.Scatter(x=fc["time"], y=fc["wind_speed_kmh"], name="Wind Speed (km/h)",
+                                   line=dict(color="#f5b942", width=2), yaxis="y2"))
+        fig.update_layout(
+            template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827", height=400,
+            yaxis=dict(title="Wave Height (m)"),
+            yaxis2=dict(title="Wind Speed (km/h)", overlaying="y", side="right", showgrid=False),
+            legend=dict(orientation="h", y=1.1), margin=dict(t=10, b=10),
+        )
+        st.plotly_chart(fig, width="stretch")
+
+        st.markdown("---")
+        st.markdown("##### 🔗 Apply to Shipment Scorer")
+        st.caption(f"If you're scoring a shipment through {selected_port} right now, you can carry these live readings over as the Weather Severity Index input in the Scorer tab.")
+        implied_severity = min(10.0, round((conditions["current_wave_height_m"] or 0) * 1.8 + (conditions["current_wind_kmh"] or 0) / 15, 1))
+        st.info(f"Suggested Weather Severity Index based on live conditions at {selected_port}: **{implied_severity} / 10**")
+
 st.markdown("---")
 st.markdown(
-    "<span class='small-caption'>Supply Chain Disruption Risk Engine · Built with XGBoost, SHAP, and Streamlit · Leading-indicator model, no outcome leakage</span>",
+    "<span class='small-caption'>Supply Chain Disruption Risk Engine · Built with XGBoost, PyTorch, SHAP, and Streamlit · Leading-indicator model, no outcome leakage</span>",
     unsafe_allow_html=True,
 )
