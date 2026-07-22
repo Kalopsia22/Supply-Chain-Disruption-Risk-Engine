@@ -1,0 +1,104 @@
+{
+  "cat_cardinalities": {
+    "Origin_City": 6,
+    "Destination_City": 6,
+    "Route_Type": 5,
+    "Transportation_Mode": 2,
+    "Product_Category": 7
+  },
+  "categories": {
+    "Origin_City": [
+      "Hamburg, DE",
+      "Mumbai, IN",
+      "Santos, BR",
+      "Shanghai, CN",
+      "Shenzhen, CN",
+      "Tokyo, JP"
+    ],
+    "Destination_City": [
+      "Felixstowe, UK",
+      "Los Angeles, US",
+      "New York, US",
+      "Rotterdam, NL",
+      "Shanghai, CN",
+      "Singapore, SG"
+    ],
+    "Route_Type": [
+      "Atlantic",
+      "Commodity",
+      "Intra-Asia",
+      "Pacific",
+      "Suez"
+    ],
+    "Transportation_Mode": [
+      "Air",
+      "Sea"
+    ],
+    "Product_Category": [
+      "Auto Parts",
+      "Consumer Electronics",
+      "Perishable Foods",
+      "Pharmaceuticals",
+      "Raw Materials",
+      "Semiconductors",
+      "Textiles"
+    ]
+  },
+  "scaler_mean": [
+    17.526375,
+    19.5245,
+    1.998125,
+    0.2452972222222222,
+    0.49724125,
+    4.970524999999999,
+    3.52173875,
+    11428.9420075,
+    5044.84325,
+    2.2391708792702847,
+    0.49714687500000004,
+    6.493625,
+    2.5035,
+    2.967
+  ],
+  "scaler_scale": [
+    10.88608305862926,
+    10.9155691445751,
+    0.8189148211963195,
+    0.31712281589584423,
+    0.23159102270692078,
+    2.8755866748152457,
+    1.20756568734311,
+    21076.80796309213,
+    2826.106699185195,
+    3.452492652462667,
+    0.18579659658544442,
+    3.4421227984159715,
+    1.1148936047892644,
+    1.9918988428130582
+  ],
+  "numeric_features": [
+    "Base_Lead_Time_Days",
+    "Scheduled_Lead_Time_Days",
+    "Schedule_Buffer_Days",
+    "Schedule_Buffer_Ratio",
+    "Geopolitical_Risk_Index",
+    "Weather_Severity_Index",
+    "Inflation_Rate_Pct",
+    "Shipping_Cost_USD",
+    "Order_Weight_Kg",
+    "Cost_Per_Kg",
+    "External_Risk_Pressure",
+    "Order_Month",
+    "Order_Quarter",
+    "Order_DayOfWeek"
+  ],
+  "categorical_features": [
+    "Origin_City",
+    "Destination_City",
+    "Route_Type",
+    "Transportation_Mode",
+    "Product_Category"
+  ],
+  "test_auc": 0.9519041643304053,
+  "test_ap": 0.9093694468961961
+}
