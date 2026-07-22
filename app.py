@@ -8,7 +8,12 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 
-from data_utils import load_scored_data, score_single_shipment, CITY_COORDS
+from data_utils import (
+    load_scored_data, score_single_shipment, CITY_COORDS,
+    compute_global_shap, compute_single_shap, clean_feature_name,
+    compute_anomaly_scores, score_single_anomaly, compute_clusters,
+    monte_carlo_portfolio, generate_underwriting_memo,
+)
 
 st.set_page_config(
     page_title="Supply Chain Risk Engine",
@@ -120,8 +125,8 @@ st.sidebar.markdown(
 # ---------------------------------------------------------------------------
 # TABS
 # ---------------------------------------------------------------------------
-tab_overview, tab_map, tab_explorer, tab_scorer, tab_explain = st.tabs(
-    ["📊 Portfolio Overview", "🌍 Global Risk Map", "🔍 Risk Explorer", "🎯 Shipment Risk Scorer", "🧠 Model Explainability"]
+tab_overview, tab_map, tab_explorer, tab_scorer, tab_explain, tab_ailab = st.tabs(
+    ["📊 Portfolio Overview", "🌍 Global Risk Map", "🔍 Risk Explorer", "🎯 Shipment Risk Scorer", "🧠 Model Explainability", "🤖 Advanced AI Lab"]
 )
 
 # ============================== OVERVIEW ==================================
@@ -365,20 +370,127 @@ with tab_scorer:
         else:
             st.success("Underwriting note: this shipment profile falls in the Low/Medium risk band — standard terms are reasonable.")
 
+        st.markdown("---")
+        st.markdown("##### Why this score? (SHAP explanation for this shipment)")
+        with st.spinner("Computing SHAP explanation..."):
+            sv_row, feat_row, base_value = compute_single_shap({
+                "base_lead_time": base_lead, "scheduled_lead_time": sched_lead,
+                "geo_risk": geo_risk, "weather_risk": weather_risk, "inflation": inflation,
+                "shipping_cost": shipping_cost, "order_weight": order_weight,
+                "order_month": order_month, "day_of_week": day_of_week,
+                "origin": origin, "destination": destination, "route_type": route_type,
+                "mode": mode, "category": category,
+            })
+
+        exp_df = pd.DataFrame({
+            "feature": [clean_feature_name(f) for f in feat_row.index],
+            "shap_value": sv_row,
+        })
+        exp_df["abs"] = exp_df["shap_value"].abs()
+        exp_df = exp_df.sort_values("abs", ascending=False).head(10).sort_values("shap_value")
+
+        fig = go.Figure(go.Bar(
+            x=exp_df["shap_value"], y=exp_df["feature"], orientation="h",
+            marker_color=["#ef4444" if v > 0 else "#2dd4bf" for v in exp_df["shap_value"]],
+            text=[f"{v:+.3f}" for v in exp_df["shap_value"]], textposition="outside",
+        ))
+        fig.update_layout(
+            template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
+            height=380, margin=dict(t=20, b=10, l=10, r=50),
+            xaxis_title="SHAP value (red = pushes risk up, teal = pushes risk down)",
+        )
+        st.plotly_chart(fig, width="stretch")
+        st.caption(f"Base rate (average predicted risk before considering this shipment's features): {base_value:.3f}. Bars show how each feature moved this specific shipment away from that baseline.")
+
+        st.markdown("---")
+        st.markdown("##### Anomaly Check (Isolation Forest)")
+        st.caption("Independent of the risk score — flags shipments whose feature combination is statistically unusual (e.g. an oddly cheap or oddly heavy shipment for its category), which can matter for quality/fraud review even on shipments the risk model considers low-risk.")
+
+        @st.cache_resource(show_spinner="Fitting anomaly detector...")
+        def _get_anomaly_model():
+            _, model, scaler = compute_anomaly_scores(df)
+            return model, scaler
+
+        anomaly_model, anomaly_scaler = _get_anomaly_model()
+        anomaly_result = score_single_anomaly({
+            "base_lead_time": base_lead, "scheduled_lead_time": sched_lead,
+            "geo_risk": geo_risk, "weather_risk": weather_risk, "inflation": inflation,
+            "shipping_cost": shipping_cost, "order_weight": order_weight,
+            "order_month": order_month, "day_of_week": day_of_week,
+            "origin": origin, "destination": destination, "route_type": route_type,
+            "mode": mode, "category": category,
+        }, anomaly_model, anomaly_scaler)
+
+        if anomaly_result["is_anomaly"]:
+            st.error(f"⚠️ Flagged as a statistical outlier (anomaly score: {anomaly_result['anomaly_score']:.3f}). This shipment's cost/weight/lead-time profile doesn't resemble typical shipments in the historical data — worth a manual look regardless of its risk tier.")
+        else:
+            st.info(f"✅ Not flagged as an outlier (anomaly score: {anomaly_result['anomaly_score']:.3f}). This shipment's profile is consistent with typical historical shipments.")
+
+        st.markdown("---")
+        st.markdown("##### 📝 Auto-Generated Underwriting Memo")
+        shipment_desc = f"{origin} → {destination}, {mode}, {category}"
+        memo = generate_underwriting_memo(shipment_desc, result, sv_row, feat_row)
+        st.markdown(f"> {memo}")
+
 # ============================== EXPLAINABILITY ===============================
 with tab_explain:
     st.markdown("#### Why the Model Flags Risk the Way It Does")
-    st.caption("SHAP feature importance from the delay-probability classifier, computed offline on the full training set.")
+    st.caption("SHAP (SHapley Additive exPlanations) values computed live from the trained classifier — not a static image, so this always matches the model actually running.")
 
-    import os
-    img_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-    shap_bar = os.path.join(img_dir, "shap_top_drivers.png")
-    shap_summary = os.path.join(img_dir, "shap_summary.png")
+    @st.cache_data(show_spinner="Computing SHAP values...")
+    def _global_shap():
+        shap_values, X_trans_df = compute_global_shap(df, sample_size=800)
+        return shap_values, X_trans_df
 
-    if os.path.exists(shap_bar):
-        st.image(shap_bar, width='stretch')
-    if os.path.exists(shap_summary):
-        st.image(shap_summary, width='stretch')
+    shap_values, X_trans_df = _global_shap()
+
+    mean_abs = np.abs(shap_values).mean(axis=0)
+    order = np.argsort(mean_abs)[::-1][:15]
+    labels = [clean_feature_name(X_trans_df.columns[i]) for i in order][::-1]
+    values = [mean_abs[i] for i in order][::-1]
+
+    fig = go.Figure(go.Bar(
+        x=values, y=labels, orientation="h",
+        marker_color="#2dd4bf",
+        text=[f"{v:.3f}" for v in values], textposition="outside",
+    ))
+    fig.update_layout(
+        template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
+        height=480, margin=dict(t=20, b=10, l=10, r=40),
+        xaxis_title="Mean |SHAP value| — average impact on predicted delay risk",
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    st.markdown("##### Distribution of Impact (Beeswarm)")
+    st.caption("Each dot is one shipment. Position = SHAP value (pushes risk up or down). Color = whether that feature's value was high (red) or low (blue) for that shipment.")
+
+    top_n = 12
+    top_idx = np.argsort(mean_abs)[::-1][:top_n]
+    beeswarm_fig = go.Figure()
+    for rank, i in enumerate(top_idx[::-1]):
+        col = X_trans_df.columns[i]
+        vals = X_trans_df[col].values
+        sv = shap_values[:, i]
+        norm = (vals - vals.min()) / (vals.max() - vals.min() + 1e-9)
+        jitter = (np.random.rand(len(sv)) - 0.5) * 0.6
+        beeswarm_fig.add_trace(go.Scatter(
+            x=sv, y=[rank + j for j in jitter],
+            mode="markers",
+            marker=dict(size=5, color=norm, colorscale="RdBu_r", opacity=0.6,
+                        line=dict(width=0)),
+            name=clean_feature_name(col),
+            showlegend=False,
+            hovertext=[f"{clean_feature_name(col)}: {v:.2f}" for v in vals],
+            hoverinfo="text",
+        ))
+    beeswarm_fig.update_layout(
+        template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
+        height=460, margin=dict(t=20, b=10, l=10, r=10),
+        yaxis=dict(tickmode="array", tickvals=list(range(top_n)),
+                   ticktext=[clean_feature_name(X_trans_df.columns[i]) for i in top_idx[::-1]]),
+        xaxis_title="SHAP value (impact on predicted delay risk)",
+    )
+    st.plotly_chart(beeswarm_fig, width="stretch")
 
     st.markdown("---")
     st.markdown(
@@ -390,6 +502,141 @@ with tab_explain:
         not a limitation hidden from the viewer.
         """
     )
+
+# ============================== ADVANCED AI LAB ===============================
+with tab_ailab:
+    st.markdown("#### Beyond the Core Model: Unsupervised & Simulation Techniques")
+    st.caption("These sections use different ML techniques than the classifier/regressor above — unsupervised anomaly detection, unsupervised clustering, and Monte Carlo simulation — to surface patterns the supervised risk score alone doesn't show.")
+
+    lab_anomaly, lab_cluster, lab_montecarlo = st.tabs(
+        ["🚨 Anomaly Detection", "🧬 Risk Archetypes (Clustering)", "🎲 Portfolio Monte Carlo Simulation"]
+    )
+
+    # --- Anomaly Detection sub-tab ---
+    with lab_anomaly:
+        st.markdown("##### Isolation Forest — Unusual Shipment Detection")
+        st.caption("Unsupervised — doesn't use the delay label at all. Flags shipments whose cost/weight/lead-time/risk-index combination is statistically unusual relative to the rest of the portfolio. Deliberately independent of the risk score: a shipment can be Low risk-tier and still get flagged here.")
+
+        @st.cache_data(show_spinner="Fitting Isolation Forest...")
+        def _anomaly_df():
+            adf, _, _ = compute_anomaly_scores(df)
+            return adf
+
+        adf = _anomaly_df()
+        adf_f = adf.loc[fdf.index]
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Anomalies Flagged", f"{adf_f['Is_Anomaly'].sum():,}")
+        c2.metric("% of Filtered Portfolio", f"{adf_f['Is_Anomaly'].mean()*100:.1f}%")
+        c3.metric("Anomaly + Low Risk Tier", f"{((adf_f['Is_Anomaly']) & (adf_f['Risk_Tier']=='Low')).sum():,}")
+        st.caption("The third metric is the interesting one — shipments the risk model considers safe, but that are structurally unusual. Worth a quality/fraud review pass independent of delay risk.")
+
+        fig = px.scatter(
+            adf_f, x="Cost_Per_Kg", y="Shipment_Risk_Score",
+            color="Is_Anomaly", color_discrete_map={True: "#ef4444", False: "#2dd4bf"},
+            hover_data=["Origin_City", "Destination_City", "Transportation_Mode", "Product_Category"],
+            opacity=0.6, labels={"Is_Anomaly": "Anomaly"},
+        )
+        fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827", height=440)
+        st.plotly_chart(fig, width="stretch")
+
+        st.markdown("###### Top Flagged Shipments")
+        show_cols = ["Order_ID", "Route", "Transportation_Mode", "Product_Category", "Cost_Per_Kg", "Shipment_Risk_Score", "Risk_Tier", "Anomaly_Score"]
+        st.dataframe(
+            adf_f[adf_f["Is_Anomaly"]].sort_values("Anomaly_Score", ascending=False)[show_cols].head(50),
+            width="stretch", hide_index=True, height=320,
+        )
+
+    # --- Clustering sub-tab ---
+    with lab_cluster:
+        st.markdown("##### K-Means Risk Archetypes")
+        st.caption("Unsupervised segmentation on cost, weight, lead time, and risk-index features (not on the delay label). Reveals natural portfolio groupings a trade-finance desk could price or monitor differently.")
+
+        n_clusters = st.slider("Number of archetypes", 3, 8, 5)
+
+        @st.cache_data(show_spinner="Running K-Means + PCA...")
+        def _clusters(k):
+            return compute_clusters(df, n_clusters=k)
+
+        cdf, profile = _clusters(n_clusters)
+        cdf_f = cdf.loc[cdf.index.isin(fdf.index)]
+
+        st.markdown("###### Archetype Profiles")
+        display_profile = profile.copy()
+        display_profile["avg_risk_score"] = display_profile["avg_risk_score"].round(1)
+        display_profile["delay_rate"] = (display_profile["delay_rate"] * 100).round(1)
+        display_profile["avg_cost"] = display_profile["avg_cost"].round(0)
+        display_profile["avg_cost_per_kg"] = display_profile["avg_cost_per_kg"].round(2)
+        st.dataframe(
+            display_profile[["Cluster", "archetype_label", "size", "avg_risk_score", "delay_rate", "avg_cost_per_kg"]]
+            .rename(columns={"avg_risk_score": "Avg Risk Score", "delay_rate": "Delay Rate (%)", "avg_cost_per_kg": "Avg Cost/Kg", "size": "Shipments"}),
+            width="stretch", hide_index=True,
+        )
+
+        st.markdown("###### Cluster Map (PCA Projection)")
+        fig = px.scatter(
+            cdf_f, x="PCA_1", y="PCA_2", color=cdf_f["Cluster"].astype(str),
+            hover_data=["Transportation_Mode", "Product_Category", "Shipment_Risk_Score"],
+            opacity=0.6, color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827", height=460,
+                           legend_title_text="Cluster")
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Each point is one shipment, projected from 7 numeric features down to 2D via PCA. Distinct clusters here mean the underlying feature combinations are genuinely different, not just relabeled risk tiers.")
+
+    # --- Monte Carlo sub-tab ---
+    with lab_montecarlo:
+        st.markdown("##### Portfolio Exposure Simulation")
+        st.caption("Treats each shipment's predicted delay probability as an independent Bernoulli trial and simulates the filtered portfolio thousands of times — a lightweight, VaR-style view of tail risk, not just the average case.")
+
+        n_sims = st.select_slider("Number of simulations", options=[500, 1000, 2000, 5000], value=2000)
+
+        if len(fdf) == 0:
+            st.warning("No shipments match the current filters.")
+        else:
+            with st.spinner(f"Running {n_sims:,} Monte Carlo simulations..."):
+                mc = monte_carlo_portfolio(fdf, n_simulations=n_sims)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Expected Delayed Shipments", f"{mc['expected_delayed']:.0f}")
+            c2.metric("95th Pctile Delayed (tail case)", f"{mc['p95_delayed']:.0f}")
+            c3.metric("Expected Financial Exposure", f"${mc['expected_exposure']:,.0f}")
+
+            c4, c5 = st.columns(2)
+            c4.metric("95th Pctile Exposure", f"${mc['p95_exposure']:,.0f}")
+            c5.metric("99th Pctile Exposure", f"${mc['p99_exposure']:,.0f}")
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                fig = go.Figure(go.Histogram(x=mc["delayed_counts"], marker_color="#2dd4bf", nbinsx=40))
+                fig.add_vline(x=mc["expected_delayed"], line_dash="dash", line_color="#f5b942",
+                              annotation_text="Expected", annotation_font_color="#f5b942")
+                fig.add_vline(x=mc["p95_delayed"], line_dash="dash", line_color="#ef4444",
+                              annotation_text="95th pctile", annotation_font_color="#ef4444")
+                fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
+                                   height=380, title="Distribution: Number of Delayed Shipments",
+                                   xaxis_title="Delayed shipment count")
+                st.plotly_chart(fig, width="stretch")
+            with col_b:
+                fig = go.Figure(go.Histogram(x=mc["exposure"], marker_color="#f5b942", nbinsx=40))
+                fig.add_vline(x=mc["expected_exposure"], line_dash="dash", line_color="#2dd4bf",
+                              annotation_text="Expected", annotation_font_color="#2dd4bf")
+                fig.add_vline(x=mc["p95_exposure"], line_dash="dash", line_color="#ef4444",
+                              annotation_text="95th pctile", annotation_font_color="#ef4444")
+                fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
+                                   height=380, title="Distribution: Financial Exposure to Delay ($)",
+                                   xaxis_title="Total exposure (USD)")
+                st.plotly_chart(fig, width="stretch")
+
+            st.markdown(
+                f"""
+                **Reading this:** on average, this filtered portfolio of **{len(fdf):,} shipments** is expected to see
+                **{mc['expected_delayed']:.0f} delayed shipments**, representing roughly **${mc['expected_exposure']:,.0f}**
+                in shipping cost exposed to delay. In a bad-case scenario (95th percentile across simulations), that could
+                rise to **{mc['p95_delayed']:.0f} delayed shipments** and **${mc['p95_exposure']:,.0f}** of exposure —
+                the kind of tail-risk figure a portfolio risk committee would want alongside the average.
+                """
+            )
 
 st.markdown("---")
 st.markdown(
