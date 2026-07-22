@@ -352,21 +352,32 @@ with tab_map:
 # ============================== EXPLORER ===================================
 with tab_explorer:
     st.markdown("#### 🔍 Shipment-Level Explorer")
-    col1, col2 = st.columns([2, 1])
+    col1, col2 = st.columns([1.4, 1])
     with col1:
-        fig = px.scatter(
+        st.markdown("##### Density: Geopolitical Risk vs Risk Score")
+        st.caption("Heatmap of shipment concentration — avoids the overplotting a raw scatter of thousands of points would create.")
+        fig = px.density_heatmap(
             fdf, x="Geopolitical_Risk_Index", y="Shipment_Risk_Score",
-            color="Risk_Tier", color_discrete_map=TIER_COLORS,
-            hover_data=["Origin_City", "Destination_City", "Transportation_Mode", "Product_Category"],
-            opacity=0.6,
+            nbinsx=25, nbinsy=25, color_continuous_scale="Teal",
         )
-        fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827", height=420)
-        st.plotly_chart(fig, width='stretch')
+        fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
+                           height=440, coloraxis_colorbar=dict(title="Shipments"))
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Notice there's no diagonal trend — risk score is high across the full range of geopolitical risk index, reinforcing that this feature isn't actually driving the score much (consistent with the SHAP findings).")
     with col2:
-        fig = px.pie(fdf, names="Risk_Tier", color="Risk_Tier", color_discrete_map=TIER_COLORS, hole=0.55)
-        fig.update_layout(template="plotly_dark", paper_bgcolor="#111827", height=420,
-                           legend=dict(orientation="h", y=-0.1))
-        st.plotly_chart(fig, width='stretch')
+        st.markdown("##### Risk Score Spread by Tier")
+        fig = go.Figure()
+        for t in ["Low", "Medium", "High", "Severe"]:
+            sub = fdf.loc[fdf["Risk_Tier"] == t, "Shipment_Risk_Score"]
+            if len(sub) > 0:
+                fig.add_trace(go.Violin(
+                    y=sub, name=t, box_visible=True, meanline_visible=True,
+                    line_color=TIER_COLORS[t], fillcolor=TIER_COLORS[t], opacity=0.55,
+                ))
+        fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827",
+                           height=440, showlegend=False, yaxis_title="Shipment Risk Score")
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Violin width = density of shipments at that score. Tight, non-overlapping shapes confirm clean tier separation.")
 
     st.markdown("##### 🔥 Highest-Risk Shipments")
     show_cols = [
@@ -628,13 +639,31 @@ with tab_ailab:
         c3.metric("Anomaly + Low Risk Tier", f"{((adf_f['Is_Anomaly']) & (adf_f['Risk_Tier']=='Low')).sum():,}")
         st.caption("The third metric is the interesting one — shipments the risk model considers safe, but that are structurally unusual. Worth a quality/fraud review pass independent of delay risk.")
 
-        fig = px.scatter(
-            adf_f, x="Cost_Per_Kg", y="Shipment_Risk_Score",
-            color="Is_Anomaly", color_discrete_map={True: "#ef4444", False: "#2dd4bf"},
-            hover_data=["Origin_City", "Destination_City", "Transportation_Mode", "Product_Category"],
-            opacity=0.6, labels={"Is_Anomaly": "Anomaly"},
+        st.markdown("###### Where Anomalies Sit vs the Normal Population")
+        st.caption("Background contour = density of normal shipments (no clutter from thousands of points) · Red markers = the flagged anomalies only")
+
+        normal = adf_f[~adf_f["Is_Anomaly"]]
+        anomalous = adf_f[adf_f["Is_Anomaly"]]
+
+        fig = go.Figure()
+        fig.add_trace(go.Histogram2dContour(
+            x=normal["Cost_Per_Kg"], y=normal["Shipment_Risk_Score"],
+            colorscale="Teal", showscale=False, opacity=0.85,
+            contours=dict(coloring="fill"),
+        ))
+        fig.add_trace(go.Scatter(
+            x=anomalous["Cost_Per_Kg"], y=anomalous["Shipment_Risk_Score"],
+            mode="markers", marker=dict(color="#ef4444", size=6, line=dict(width=1, color="#0b0f19")),
+            name="Anomaly",
+            hovertext=[f"{o} → {d}<br>{m}, {c}" for o, d, m, c in zip(
+                anomalous["Origin_City"], anomalous["Destination_City"],
+                anomalous["Transportation_Mode"], anomalous["Product_Category"])],
+            hoverinfo="text",
+        ))
+        fig.update_layout(
+            template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827", height=440,
+            xaxis_title="Cost Per Kg", yaxis_title="Shipment Risk Score", showlegend=False,
         )
-        fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827", height=440)
         st.plotly_chart(fig, width="stretch")
 
         st.markdown("###### 🚩 Top Flagged Shipments")
@@ -671,15 +700,24 @@ with tab_ailab:
         )
 
         st.markdown("###### 🗺️ Cluster Map (PCA Projection)")
-        fig = px.scatter(
-            cdf_f, x="PCA_1", y="PCA_2", color=cdf_f["Cluster"].astype(str),
-            hover_data=["Transportation_Mode", "Product_Category", "Shipment_Risk_Score"],
-            opacity=0.6, color_discrete_sequence=px.colors.qualitative.Set2,
-        )
+        st.caption("Contour outlines instead of raw points — each line shows where one archetype's shipments concentrate in the 2D projection, without thousands of overlapping dots.")
+        fig = go.Figure()
+        palette = px.colors.qualitative.Set2
+        for i, c in enumerate(sorted(cdf_f["Cluster"].unique())):
+            sub = cdf_f[cdf_f["Cluster"] == c]
+            if len(sub) < 5:
+                continue
+            fig.add_trace(go.Histogram2dContour(
+                x=sub["PCA_1"], y=sub["PCA_2"], name=f"Cluster {c}",
+                showscale=False, ncontours=6,
+                contours=dict(coloring="lines", showlabels=False),
+                line=dict(width=2, color=palette[i % len(palette)]),
+            ))
         fig.update_layout(template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827", height=460,
-                           legend_title_text="Cluster")
+                           legend_title_text="Cluster", showlegend=True,
+                           xaxis_title="PCA Component 1", yaxis_title="PCA Component 2")
         st.plotly_chart(fig, width="stretch")
-        st.caption("Each point is one shipment, projected from 7 numeric features down to 2D via PCA. Distinct clusters here mean the underlying feature combinations are genuinely different, not just relabeled risk tiers.")
+        st.caption("Projected from 7 numeric features down to 2D via PCA. Separated contour shapes mean the underlying feature combinations are genuinely different, not just relabeled risk tiers.")
 
         st.markdown("###### 🕸️ Archetype Comparison (Radar)")
         st.caption("Each axis normalized 0-1 across archetypes, so shapes are directly comparable regardless of original units.")
