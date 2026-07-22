@@ -212,35 +212,39 @@ def _transform(clf_pipe, X: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(X_trans, columns=feat_names)
 
 
-def compute_global_shap(df: pd.DataFrame, sample_size: int = 800, random_state: int = 42):
-    """Return (shap_values, X_transformed_sample, feature_names) for the classifier,
-    computed on a random sample of the dataset for speed."""
-    import shap
+def _xgb_shap_contribs(clf_pipe, X_trans_df: pd.DataFrame):
+    """Compute exact SHAP values using XGBoost's native pred_contribs — mathematically
+    identical to shap.TreeExplainer for tree ensembles, with no extra dependency
+    (avoids the `shap` package's C-extension build issues on newer Python versions)."""
+    import xgboost as xgb
 
+    booster = clf_pipe.named_steps["clf"].get_booster()
+    dmat = xgb.DMatrix(X_trans_df.values, feature_names=list(X_trans_df.columns))
+    contribs = booster.predict(dmat, pred_contribs=True)
+    shap_values = contribs[:, :-1]          # per-feature contributions
+    base_value = float(contribs[:, -1].mean())  # bias term (constant across rows)
+    return shap_values, base_value
+
+
+def compute_global_shap(df: pd.DataFrame, sample_size: int = 800, random_state: int = 42):
+    """Return (shap_values, X_transformed_sample) for the classifier,
+    computed on a random sample of the dataset for speed."""
     clf, _ = load_models()
     sample = df.sample(min(sample_size, len(df)), random_state=random_state)
     X_trans_df = _transform(clf, sample)
 
-    explainer = shap.TreeExplainer(clf.named_steps["clf"])
-    shap_values = explainer.shap_values(X_trans_df)
+    shap_values, _ = _xgb_shap_contribs(clf, X_trans_df)
     return shap_values, X_trans_df
 
 
 def compute_single_shap(inputs: dict):
     """Return (shap_values_row, feature_values_row, base_value) for one hypothetical shipment."""
-    import shap
-
     clf, _ = load_models()
     row = _build_input_row(inputs)
     X_trans_df = _transform(clf, row)
 
-    explainer = shap.TreeExplainer(clf.named_steps["clf"])
-    shap_values = explainer.shap_values(X_trans_df)
-    base_value = explainer.expected_value
-    if isinstance(base_value, (list, np.ndarray)):
-        base_value = base_value[0] if len(np.shape(base_value)) else float(base_value)
-
-    return shap_values[0], X_trans_df.iloc[0], float(base_value)
+    shap_values, base_value = _xgb_shap_contribs(clf, X_trans_df)
+    return shap_values[0], X_trans_df.iloc[0], base_value
 
 
 # ---------------------------------------------------------------------------
