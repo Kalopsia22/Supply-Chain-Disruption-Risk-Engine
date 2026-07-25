@@ -13,9 +13,11 @@ from data_utils import (
     compute_global_shap, compute_single_shap, clean_feature_name,
     compute_anomaly_scores, score_single_anomaly, compute_clusters,
     monte_carlo_portfolio, generate_underwriting_memo,
+    FEATURES_NUMERIC, FEATURES_CATEGORICAL,
 )
 from dl_model import score_single_shipment_dl
 from weather_api import fetch_port_conditions, classify_conditions
+from historical_weather import fetch_all_ports_historical, merge_historical_weather, compare_ground_truth_correlation
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -133,8 +135,8 @@ st.sidebar.markdown(
 # ---------------------------------------------------------------------------
 # TABS
 # ---------------------------------------------------------------------------
-tab_overview, tab_map, tab_explorer, tab_scorer, tab_explain, tab_ailab, tab_live = st.tabs(
-    ["📊 Portfolio Overview", "🌍 Global Risk Map", "🔍 Risk Explorer", "🎯 Shipment Risk Scorer", "🧠 Model Explainability", "🤖 Advanced AI Lab", "🛰️ Live Port Conditions"]
+tab_overview, tab_map, tab_explorer, tab_scorer, tab_explain, tab_ailab, tab_live, tab_hist = st.tabs(
+    ["📊 Portfolio Overview", "🌍 Global Risk Map", "🔍 Risk Explorer", "🎯 Shipment Risk Scorer", "🧠 Model Explainability", "🤖 Advanced AI Lab", "🛰️ Live Port Conditions", "📜 Historical Validation"]
 )
 
 # ============================== OVERVIEW ==================================
@@ -941,6 +943,153 @@ with tab_live:
         st.caption(f"If you're scoring a shipment through {selected_port} right now, you can carry these live readings over as the Weather Severity Index input in the Scorer tab.")
         implied_severity = min(10.0, round((conditions["current_wave_height_m"] or 0) * 1.8 + (conditions["current_wind_kmh"] or 0) / 15, 1))
         st.info(f"Suggested Weather Severity Index based on live conditions at {selected_port}: **{implied_severity} / 10**")
+
+# ============================== HISTORICAL VALIDATION ===============================
+with tab_hist:
+    st.markdown("#### 📜 Tying Live Weather to Historical Ground Truth")
+    st.caption(
+        "The dataset's Weather_Severity_Index is synthetic. This tab pulls REAL historical weather "
+        "(Open-Meteo's Historical Weather API — ERA5/IFS reanalysis, free, no API key) for every "
+        "shipment's origin port on its actual Order_Date, then checks whether real weather correlates "
+        "with actual delays any better than the synthetic index did."
+    )
+
+    origin_cities = sorted(df["Origin_City"].unique())
+    st.markdown(f"**{len(origin_cities)} origin ports** in this dataset — one API call per port covers its entire date range, so this needs only **{len(origin_cities)} live calls total**, not one per shipment.")
+
+    if "hist_weather_df" not in st.session_state:
+        st.session_state.hist_weather_df = None
+        st.session_state.hist_fetch_errors = None
+
+    if st.button("🌦️ Fetch Real Historical Weather & Validate", type="primary"):
+        order_dates_by_city = {}
+        for city in origin_cities:
+            sub = df.loc[df["Origin_City"] == city, "Order_Date"]
+            order_dates_by_city[city] = (sub.min().strftime("%Y-%m-%d"), sub.max().strftime("%Y-%m-%d"))
+
+        progress_bar = st.progress(0, text="Starting fetch...")
+
+        def _progress(done, total, city):
+            progress_bar.progress(done / total, text=f"Fetched {city} ({done}/{total})")
+
+        with st.spinner("Calling Open-Meteo Historical Weather API..."):
+            fetch_results = fetch_all_ports_historical(order_dates_by_city, progress_callback=_progress)
+
+        progress_bar.empty()
+
+        failed = {c: r["error"] for c, r in fetch_results.items() if not r.get("ok")}
+        succeeded = [c for c, r in fetch_results.items() if r.get("ok")]
+
+        if succeeded:
+            merged = merge_historical_weather(df, fetch_results)
+            st.session_state.hist_weather_df = merged
+        st.session_state.hist_fetch_errors = failed
+
+    if st.session_state.hist_fetch_errors:
+        with st.expander(f"⚠️ {len(st.session_state.hist_fetch_errors)} port(s) failed to fetch — click for details"):
+            for city, err in st.session_state.hist_fetch_errors.items():
+                st.text(f"{city}: {err}")
+            st.caption(
+                "If every port failed with a network/connection error, the environment this dashboard is "
+                "running in doesn't have outbound internet access to archive-api.open-meteo.com — check your "
+                "hosting platform's network settings. Streamlit Cloud should have open internet access by default."
+            )
+
+    if st.session_state.hist_weather_df is not None:
+        merged = st.session_state.hist_weather_df
+        comparison = compare_ground_truth_correlation(merged)
+
+        st.markdown("---")
+        st.markdown("##### Synthetic Index vs. Real Historical Weather — Correlation with Actual Delay")
+
+        fig = go.Figure(go.Bar(
+            x=comparison["correlation_with_delay"], y=comparison["feature"], orientation="h",
+            marker_color=["#8b93a7"] + ["#2dd4bf"] * (len(comparison) - 1),
+            text=[f"{v:+.4f}" for v in comparison["correlation_with_delay"]], textposition="outside",
+        ))
+        fig.update_layout(
+            template="plotly_dark", plot_bgcolor="#111827", paper_bgcolor="#111827", height=320,
+            xaxis_title="Correlation with Is_Delayed (r)", margin=dict(t=10, b=10, l=10, r=60),
+        )
+        st.plotly_chart(fig, width="stretch")
+
+        max_real_corr = comparison.loc[comparison["feature"] != "Weather_Severity_Index (synthetic)", "correlation_with_delay"].abs().max()
+        if max_real_corr < 0.03:
+            st.info(
+                "🔍 **Real historical weather also shows essentially no correlation with delay in this dataset.** "
+                "This is a meaningful, honest result — it confirms the earlier finding wasn't an artifact of the "
+                "dataset's synthetic index specifically. In this data, disruption genuinely appears to be driven "
+                "by route/mode/category structure rather than weather conditions on the day of departure, and "
+                "that conclusion now rests on real ground truth, not just a synthetic column."
+            )
+        else:
+            st.success(
+                f"📈 **Real historical weather shows a stronger relationship with delay (|r| up to {max_real_corr:.3f}) "
+                "than the synthetic index did.** This suggests genuine weather ground truth carries more signal "
+                "than the dataset's synthetic index — worth testing as an added model feature below."
+            )
+
+        st.markdown("---")
+        st.markdown("##### Does Adding Real Weather Improve the Model?")
+        st.caption("Retrains a quick classifier with the real historical weather features added, and compares ROC-AUC to the original leading-indicator model.")
+
+        if st.button("🔬 Test Model Uplift with Real Weather Features"):
+            from sklearn.model_selection import train_test_split
+            from sklearn.preprocessing import OneHotEncoder
+            from sklearn.compose import ColumnTransformer
+            from sklearn.pipeline import Pipeline
+            from sklearn.metrics import roc_auc_score
+            import xgboost as xgb
+
+            real_cols = ["real_wind_speed_max_kmh", "real_wind_gusts_max_kmh", "real_precipitation_sum_mm"]
+            valid = merged.dropna(subset=real_cols)
+
+            if len(valid) < 500:
+                st.warning("Not enough shipments with valid real-weather data to run a fair comparison.")
+            else:
+                base_features = FEATURES_NUMERIC + FEATURES_CATEGORICAL
+                extended_features = base_features + real_cols
+
+                X_base = valid[base_features]
+                X_ext = valid[extended_features]
+                y = valid["Is_Delayed"]
+
+                preproc_base = ColumnTransformer([
+                    ("num", "passthrough", FEATURES_NUMERIC),
+                    ("cat", OneHotEncoder(handle_unknown="ignore"), FEATURES_CATEGORICAL),
+                ])
+                preproc_ext = ColumnTransformer([
+                    ("num", "passthrough", FEATURES_NUMERIC + real_cols),
+                    ("cat", OneHotEncoder(handle_unknown="ignore"), FEATURES_CATEGORICAL),
+                ])
+
+                Xb_tr, Xb_te, y_tr, y_te = train_test_split(X_base, y, test_size=0.2, random_state=42, stratify=y)
+                Xe_tr, Xe_te, _, _ = train_test_split(X_ext, y, test_size=0.2, random_state=42, stratify=y)
+
+                spw = (y_tr == 0).sum() / max((y_tr == 1).sum(), 1)
+
+                with st.spinner("Training baseline and extended models..."):
+                    pipe_base = Pipeline([("preproc", preproc_base), ("clf", xgb.XGBClassifier(
+                        n_estimators=200, max_depth=4, learning_rate=0.05, scale_pos_weight=spw, random_state=42))])
+                    pipe_base.fit(Xb_tr, y_tr)
+                    auc_base = roc_auc_score(y_te, pipe_base.predict_proba(Xb_te)[:, 1])
+
+                    pipe_ext = Pipeline([("preproc", preproc_ext), ("clf", xgb.XGBClassifier(
+                        n_estimators=200, max_depth=4, learning_rate=0.05, scale_pos_weight=spw, random_state=42))])
+                    pipe_ext.fit(Xe_tr, y_tr)
+                    auc_ext = roc_auc_score(y_te, pipe_ext.predict_proba(Xe_te)[:, 1])
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Baseline ROC-AUC", f"{auc_base:.4f}")
+                c2.metric("With Real Weather", f"{auc_ext:.4f}")
+                c3.metric("Uplift", f"{auc_ext - auc_base:+.4f}")
+
+                if auc_ext - auc_base > 0.01:
+                    st.success("Real historical weather measurably improves the model — worth folding into the production feature set.")
+                else:
+                    st.info("No meaningful uplift from adding real weather — consistent with the correlation analysis above. The model's existing route/cost/schedule features already capture what's predictable here.")
+    else:
+        st.info("Click the button above to pull real historical weather and validate the earlier synthetic-index finding against actual ground truth.")
 
 st.markdown("---")
 st.markdown(
