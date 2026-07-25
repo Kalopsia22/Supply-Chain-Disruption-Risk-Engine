@@ -65,9 +65,61 @@ def fetch_port_historical_daily(lat: float, lon: float, start_date: str, end_dat
         return {"ok": False, "error": f"Unexpected response shape: {e}"}
 
 
+def fetch_all_ports_historical_batched(city_coords: dict, start_date: str, end_date: str) -> dict:
+    """Fetch historical daily weather for ALL given ports in a SINGLE batched
+    HTTP request (one shared date range across all ports), using Open-Meteo's
+    multi-location comma-separated coordinate support — 1 request total instead
+    of 1-per-port. Falls back gracefully per-port if the batch call fails."""
+    cities = list(city_coords.keys())
+    lats = ",".join(str(city_coords[c][0]) for c in cities)
+    lons = ",".join(str(city_coords[c][1]) for c in cities)
+
+    try:
+        resp = requests.get(
+            ARCHIVE_URL,
+            params={
+                "latitude": lats, "longitude": lons,
+                "start_date": start_date, "end_date": end_date,
+                "daily": "wind_speed_10m_max,wind_gusts_10m_max,precipitation_sum",
+                "timezone": "UTC",
+            },
+            timeout=30,
+        )
+        if resp.status_code == 429:
+            return {c: {"ok": False, "error": "Rate limited by Open-Meteo (429) — this is a shared free-tier limit, wait a minute and retry."} for c in cities}
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.RequestException as e:
+        return {c: {"ok": False, "error": str(e)} for c in cities}
+
+    # Same single-vs-list normalization as the live weather module.
+    data_list = data if isinstance(data, list) else [data]
+
+    results = {}
+    for i, city in enumerate(cities):
+        try:
+            daily = data_list[i].get("daily", {})
+            dates = daily.get("time", [])
+            if not dates:
+                results[city] = {"ok": False, "error": "Empty response (no daily data returned)."}
+                continue
+            df = pd.DataFrame({
+                "date": pd.to_datetime(dates).date,
+                "real_wind_speed_max_kmh": daily.get("wind_speed_10m_max", [None] * len(dates)),
+                "real_wind_gusts_max_kmh": daily.get("wind_gusts_10m_max", [None] * len(dates)),
+                "real_precipitation_sum_mm": daily.get("precipitation_sum", [None] * len(dates)),
+            })
+            results[city] = {"ok": True, "df": df}
+        except (IndexError, KeyError, TypeError, ValueError) as e:
+            results[city] = {"ok": False, "error": f"Could not parse response for {city}: {e}"}
+    return results
+
+
 def fetch_all_ports_historical(order_dates_by_city: dict, progress_callback=None) -> dict:
     """order_dates_by_city: {city_name: (min_date_str, max_date_str)}.
-    Returns {city_name: fetch_result_dict} for every port, one API call each."""
+    Returns {city_name: fetch_result_dict} for every port, one API call each.
+    Prefer fetch_all_ports_historical_batched() when all ports can share a
+    single date range — that's 1 request total instead of N."""
     results = {}
     cities = list(order_dates_by_city.keys())
     for i, city in enumerate(cities):
