@@ -16,8 +16,8 @@ from data_utils import (
     FEATURES_NUMERIC, FEATURES_CATEGORICAL,
 )
 from dl_model import score_single_shipment_dl
-from weather_api import fetch_port_conditions, classify_conditions
-from historical_weather import fetch_all_ports_historical, merge_historical_weather, compare_ground_truth_correlation
+from weather_api import fetch_all_ports_conditions, classify_conditions
+from historical_weather import fetch_all_ports_historical, fetch_all_ports_historical_batched, merge_historical_weather, compare_ground_truth_correlation
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -869,7 +869,7 @@ with tab_live:
 
     col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.4, 1, 1])
     with col_ctrl1:
-        refresh_minutes = st.select_slider("Auto-refresh every", options=[1, 5, 10, 15, 30], value=10, format_func=lambda m: f"{m} min")
+        refresh_minutes = st.select_slider("Auto-refresh every", options=[5, 10, 15, 30], value=10, format_func=lambda m: f"{m} min")
     with col_ctrl2:
         auto_on = st.toggle("Auto-refresh", value=False)
     with col_ctrl3:
@@ -880,13 +880,14 @@ with tab_live:
             st_autorefresh(interval=refresh_minutes * 60 * 1000, key="live_conditions_refresh")
         else:
             st.warning("Install `streamlit-autorefresh` (already in requirements.txt) to enable automatic refresh; using manual refresh for now.")
+    st.caption("Auto-refresh minimum is 5 min — all 11 ports are fetched in a single batched request (2 HTTP calls total), so refreshing more often than that isn't needed and risks the free tier's rate limit.")
 
     @st.cache_data(ttl=600, show_spinner=False)
-    def _cached_port_conditions(port_name, lat, lon, _cache_bust):
-        return fetch_port_conditions(lat, lon)
+    def _cached_all_ports_conditions(_cache_bust):
+        return fetch_all_ports_conditions(CITY_COORDS)
 
     if manual_refresh:
-        _cached_port_conditions.clear()
+        _cached_all_ports_conditions.clear()
 
     import datetime
     now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -895,19 +896,27 @@ with tab_live:
     st.markdown(f"<span class='small-caption'>Last fetched (UTC, rounded to cache window): {now_utc.strftime('%Y-%m-%d %H:%M')}</span>", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
+    with st.spinner("Fetching live conditions for all 11 ports (2 batched requests)..."):
+        all_conditions = _cached_all_ports_conditions(fetch_time_bucket)
+
     selected_port = st.selectbox("Select a port", sorted(CITY_COORDS.keys()))
-    lat, lon = CITY_COORDS[selected_port]
+    conditions = all_conditions.get(selected_port, {"ok": False, "error": "Port not found in fetch results."})
 
-    with st.spinner(f"Fetching live conditions for {selected_port}..."):
-        conditions = _cached_port_conditions(selected_port, lat, lon, fetch_time_bucket)
-
-    if not conditions.get("ok"):
+    failed_ports = [c for c, r in all_conditions.items() if not r.get("ok")]
+    if len(failed_ports) == len(all_conditions):
         st.error(
-            f"Could not fetch live data for {selected_port}: {conditions.get('error', 'unknown error')}. "
-            "If this persists, check that your Streamlit Cloud deployment has outbound internet access to "
+            f"Could not fetch live data for any port: {conditions.get('error', 'unknown error')}. "
+            "If this is a 429, wait a minute and try again — it's a shared free-tier rate limit, not a "
+            "network access problem (a 429 response means the request reached Open-Meteo successfully). "
+            "If it's a different error, check that this deployment has outbound internet access to "
             "api.open-meteo.com and marine-api.open-meteo.com."
         )
+    elif not conditions.get("ok"):
+        st.warning(f"{selected_port} specifically failed to parse ({conditions.get('error')}), but other ports fetched fine — try selecting a different port or refreshing.")
     else:
+        if failed_ports:
+            st.caption(f"⚠️ {len(failed_ports)} port(s) failed this fetch: {', '.join(failed_ports)}. Showing {selected_port}, which fetched successfully.")
+
         classification = classify_conditions(conditions["current_wave_height_m"], conditions["current_wind_kmh"])
 
         c1, c2, c3, c4 = st.columns(4)
@@ -955,27 +964,19 @@ with tab_hist:
     )
 
     origin_cities = sorted(df["Origin_City"].unique())
-    st.markdown(f"**{len(origin_cities)} origin ports** in this dataset — one API call per port covers its entire date range, so this needs only **{len(origin_cities)} live calls total**, not one per shipment.")
+    st.markdown(f"**{len(origin_cities)} origin ports** in this dataset — all fetched in **a single batched API call** covering every port's full date range at once, not one call per port or per shipment.")
 
     if "hist_weather_df" not in st.session_state:
         st.session_state.hist_weather_df = None
         st.session_state.hist_fetch_errors = None
 
     if st.button("🌦️ Fetch Real Historical Weather & Validate", type="primary"):
-        order_dates_by_city = {}
-        for city in origin_cities:
-            sub = df.loc[df["Origin_City"] == city, "Order_Date"]
-            order_dates_by_city[city] = (sub.min().strftime("%Y-%m-%d"), sub.max().strftime("%Y-%m-%d"))
+        global_start = df["Order_Date"].min().strftime("%Y-%m-%d")
+        global_end = df["Order_Date"].max().strftime("%Y-%m-%d")
+        city_coords_subset = {c: CITY_COORDS[c] for c in origin_cities if c in CITY_COORDS}
 
-        progress_bar = st.progress(0, text="Starting fetch...")
-
-        def _progress(done, total, city):
-            progress_bar.progress(done / total, text=f"Fetched {city} ({done}/{total})")
-
-        with st.spinner("Calling Open-Meteo Historical Weather API..."):
-            fetch_results = fetch_all_ports_historical(order_dates_by_city, progress_callback=_progress)
-
-        progress_bar.empty()
+        with st.spinner(f"Calling Open-Meteo Historical Weather API (1 batched request for all {len(city_coords_subset)} ports)..."):
+            fetch_results = fetch_all_ports_historical_batched(city_coords_subset, global_start, global_end)
 
         failed = {c: r["error"] for c, r in fetch_results.items() if not r.get("ok")}
         succeeded = [c for c, r in fetch_results.items() if r.get("ok")]
