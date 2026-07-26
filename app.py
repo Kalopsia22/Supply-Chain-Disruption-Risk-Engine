@@ -18,6 +18,7 @@ from data_utils import (
 from dl_model import score_single_shipment_dl
 from weather_api import fetch_all_ports_conditions, classify_conditions
 from historical_weather import fetch_all_ports_historical, fetch_all_ports_historical_batched, merge_historical_weather, compare_ground_truth_correlation
+from route_optimizer import build_route_graph, optimize_route, compare_priorities
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -135,8 +136,8 @@ st.sidebar.markdown(
 # ---------------------------------------------------------------------------
 # TABS
 # ---------------------------------------------------------------------------
-tab_overview, tab_map, tab_explorer, tab_scorer, tab_explain, tab_ailab, tab_live, tab_hist = st.tabs(
-    ["📊 Portfolio Overview", "🌍 Global Risk Map", "🔍 Risk Explorer", "🎯 Shipment Risk Scorer", "🧠 Model Explainability", "🤖 Advanced AI Lab", "🛰️ Live Port Conditions", "📜 Historical Validation"]
+tab_overview, tab_map, tab_explorer, tab_scorer, tab_explain, tab_ailab, tab_live, tab_hist, tab_route = st.tabs(
+    ["📊 Portfolio Overview", "🌍 Global Risk Map", "🔍 Risk Explorer", "🎯 Shipment Risk Scorer", "🧠 Model Explainability", "🤖 Advanced AI Lab", "🛰️ Live Port Conditions", "📜 Historical Validation", "🧭 Route Optimizer"]
 )
 
 # ============================== OVERVIEW ==================================
@@ -1091,6 +1092,145 @@ with tab_hist:
                     st.info("No meaningful uplift from adding real weather — consistent with the correlation analysis above. The model's existing route/cost/schedule features already capture what's predictable here.")
     else:
         st.info("Click the button above to pull real historical weather and validate the earlier synthetic-index finding against actual ground truth.")
+
+# ============================== ROUTE OPTIMIZER ===============================
+with tab_route:
+    st.markdown("#### 🧭 Intelligent Logistics Route Optimizer")
+    st.caption(
+        "Combines a classical route-optimization algorithm (Dijkstra's shortest path, via networkx) with "
+        "AI/ML-driven edge weighting — every leg's risk cost comes from real historical data patterns and "
+        "the trained models used throughout this dashboard, not a distance-only heuristic."
+    )
+
+    with st.expander("⚠️ Important: how risk is estimated for routes not in the historical dataset — read before trusting absolute numbers", expanded=False):
+        st.markdown(
+            """
+            The historical dataset contains exactly **6 fixed lanes** (e.g. Shenzhen→Rotterdam is always
+            the Suez route, Shanghai→Los Angeles is always Pacific) — there's no free combination of any
+            origin with any destination in the training data. During development, scoring a synthetic
+            Shanghai→Rotterdam shipment directly through the trained classifier produced a wildly different
+            (and unreliable) risk estimate than the near-identical real Shenzhen→Rotterdam lane — a single
+            feature swap could swing predicted probability from 0.86 to 0.0005. That's what happens when a
+            classifier trained on only 6 narrow historical clusters is asked to extrapolate.
+
+            **So this optimizer's primary risk signal is the robust historical base rate** for the inferred
+            route type / mode / product category (aggregated over 1,600+ real shipments per route type,
+            far more stable than a single-point prediction), nudged by live weather when available. The
+            trained classifier's raw prediction is still shown per leg as a transparent secondary data point
+            — but it's not what drives the routing decision, because it isn't reliable for novel city pairs.
+
+            **Bottom line:** treat this tool as strongest for *relative* comparison — ranking route and
+            priority options for the same hypothetical shipment under one consistent model — rather than as
+            a precise absolute forecast for arbitrary new port pairs.
+            """
+        )
+
+    all_ports = sorted(CITY_COORDS.keys())
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        route_origin = st.selectbox("Origin Port", all_ports, index=all_ports.index("Shenzhen, CN") if "Shenzhen, CN" in all_ports else 0, key="route_origin")
+    with col2:
+        route_dest = st.selectbox("Destination Port", all_ports, index=all_ports.index("Rotterdam, NL") if "Rotterdam, NL" in all_ports else 1, key="route_dest")
+    with col3:
+        route_mode = st.selectbox("Transportation Mode", ["Sea", "Air"], key="route_mode")
+
+    col4, col5, col6 = st.columns(3)
+    with col4:
+        route_category = st.selectbox("Product Category", sorted(df["Product_Category"].unique()), key="route_category")
+    with col5:
+        route_priority = st.selectbox("Optimize For", ["Balanced", "Fastest", "Cheapest", "Safest"], key="route_priority")
+    with col6:
+        use_live_weather = st.toggle("Factor in live weather", value=False, help="Pulls current conditions for all ports (reuses the Live Port Conditions data) and nudges risk estimates accordingly.")
+
+    port_subset = tuple(sorted(all_ports))
+
+    if st.button("🧭 Optimize Route", type="primary"):
+        if route_origin == route_dest:
+            st.warning("Origin and destination are the same port.")
+        else:
+            live_weather_data = None
+            if use_live_weather:
+                with st.spinner("Fetching live conditions for weather-adjusted routing..."):
+                    live_weather_data = fetch_all_ports_conditions(CITY_COORDS)
+
+            @st.cache_data(ttl=1800, show_spinner=False)
+            def _cached_graph(ports_tuple, mode, category, weather_bust):
+                return build_route_graph(list(ports_tuple), mode, category, live_weather_data if weather_bust else None)
+
+            with st.spinner(f"Building risk-weighted graph across {len(port_subset)} ports (Dijkstra + ML edge scoring)..."):
+                G = _cached_graph(port_subset, route_mode, route_category, use_live_weather)
+
+            result = optimize_route(G, route_origin, route_dest, priority=route_priority)
+
+            if not result["ok"]:
+                st.error(result["error"])
+            else:
+                st.session_state.route_result = result
+                st.session_state.route_graph_info = (route_origin, route_dest, route_mode, route_category)
+
+    if "route_result" in st.session_state:
+        result = st.session_state.route_result
+        o, d, m, c = st.session_state.route_graph_info
+
+        st.markdown("---")
+        st.markdown(f"##### Optimal Route: {' → '.join(result['path'])}")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("🛣️ Hops", result["num_hops"])
+        c2.metric("📏 Total Distance", f"{result['total_distance_km']:,.0f} km")
+        c3.metric("⏱️ Total Transit", f"{result['total_transit_days']:.1f} days")
+        c4.metric("💰 Total Cost", f"${result['total_cost_usd']:,.0f}")
+
+        st.metric("⚠️ Overall Delay Probability (compounded across all legs)", f"{result['overall_delay_probability']*100:.1f}%")
+
+        # Map visualization
+        fig = go.Figure()
+        path_coords = [CITY_COORDS[p] for p in result["path"]]
+        fig.add_trace(go.Scattergeo(
+            lon=[c[1] for c in path_coords], lat=[c[0] for c in path_coords],
+            mode="lines+markers+text",
+            line=dict(width=3, color="#2dd4bf"),
+            marker=dict(size=10, color="#f5b942", line=dict(width=1, color="#0b0f19")),
+            text=result["path"], textposition="top center", textfont=dict(color="#e5e7eb", size=11),
+            showlegend=False,
+        ))
+        fig.update_geos(
+            projection_type="natural earth", bgcolor="#0b0f19", landcolor="#1a2236",
+            oceancolor="#0b0f19", showcountries=True, countrycolor="#232b3e", showland=True, lakecolor="#0b0f19",
+        )
+        fig.update_layout(template="plotly_dark", paper_bgcolor="#0b0f19", height=440, margin=dict(t=10, b=10, l=0, r=0))
+        st.plotly_chart(fig, width="stretch")
+
+        st.markdown("##### Leg-by-Leg Breakdown")
+        legs_df = pd.DataFrame(result["legs"]).drop(columns=["risk_score"])
+        legs_df["delay_probability"] = (legs_df["delay_probability"] * 100).round(1)
+        legs_df["classifier_probability"] = (legs_df["classifier_probability"] * 100).round(1)
+        legs_df["distance_km"] = legs_df["distance_km"].round(0)
+        legs_df["transit_days"] = legs_df["transit_days"].round(1)
+        st.dataframe(
+            legs_df.rename(columns={
+                "from": "From", "to": "To", "distance_km": "Distance (km)", "transit_days": "Transit (days)",
+                "cost_usd": "Cost (USD)", "delay_probability": "Risk Est. (%)", "risk_tier": "Tier",
+                "classifier_probability": "Classifier (secondary, %)", "route_type": "Inferred Route Type",
+            }),
+            width="stretch", hide_index=True,
+        )
+        st.caption("'Risk Est.' (the historical base-rate estimate) drives routing decisions. 'Classifier (secondary)' is shown for transparency only — see the disclosure above for why it's not trusted for novel city pairs.")
+
+        st.markdown("---")
+        st.markdown("##### Compare All Priorities for This Origin/Destination")
+        comparison_df = compare_priorities(_cached_graph(port_subset, m, c, use_live_weather), o, d)
+        comparison_df["delay_probability"] = (comparison_df["delay_probability"] * 100).round(1)
+        st.dataframe(
+            comparison_df.rename(columns={
+                "priority": "Priority", "route": "Route", "hops": "Hops", "distance_km": "Distance (km)",
+                "transit_days": "Transit (days)", "cost_usd": "Cost (USD)", "delay_probability": "Delay Risk (%)",
+            }),
+            width="stretch", hide_index=True,
+        )
+        st.caption("Different priorities can select genuinely different routes — this is Dijkstra re-solving the graph with different edge-weight formulas, not just re-labeling the same path.")
+    else:
+        st.info("Choose an origin, destination, and priority above, then click **Optimize Route**.")
 
 st.markdown("---")
 st.markdown(
