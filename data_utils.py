@@ -34,8 +34,13 @@ FEATURES_CATEGORICAL = [
     "Product_Category",
 ]
 
-# Approximate coordinates for every port/city in the dataset (for the map view)
+# Approximate coordinates for every port/city tracked by the dashboard.
+# The original 11 are the exact Origin/Destination values in the dataset —
+# do not rename these, since lane aggregation in the Global Risk Map keys off
+# these exact strings. Everything past that is additional live-tracking /
+# route-optimizer-only ports not present in the historical dataset.
 CITY_COORDS = {
+    # --- Original 11 (in the historical shipment dataset) ---
     "Shanghai, CN": (31.23, 121.47),
     "Los Angeles, US": (34.05, -118.24),
     "Tokyo, JP": (35.68, 139.69),
@@ -47,6 +52,46 @@ CITY_COORDS = {
     "New York, US": (40.71, -74.01),
     "Mumbai, IN": (19.08, 72.88),
     "Felixstowe, UK": (51.96, 1.35),
+    # --- Additional major global ports (live tracking + route optimizer only) ---
+    "Ningbo-Zhoushan, CN": (29.87, 121.54),
+    "Busan, KR": (35.10, 129.04),
+    "Hong Kong, HK": (22.32, 114.17),
+    "Port Klang, MY": (3.00, 101.39),
+    "Jebel Ali, AE": (25.01, 55.06),
+    "Piraeus, GR": (37.94, 23.65),
+    "Antwerp, BE": (51.22, 4.40),
+    "Le Havre, FR": (49.49, 0.10),
+    "Valencia, ES": (39.47, -0.38),
+    "Algeciras, ES": (36.13, -5.45),
+    "Colombo, LK": (6.93, 79.85),
+    "Jakarta, ID": (-6.10, 106.88),
+    "Ho Chi Minh City, VN": (10.76, 106.70),
+    "Laem Chabang, TH": (13.08, 100.88),
+    "Durban, ZA": (-29.87, 31.02),
+    "Lagos, NG": (6.45, 3.39),
+    "Callao, PE": (-12.05, -77.15),
+    "Vancouver, CA": (49.28, -123.12),
+    "Savannah, US": (32.08, -81.09),
+    "Karachi, PK": (24.85, 66.99),
+}
+
+# Coarse region tags, used by the route optimizer to infer a plausible
+# Route_Type (Suez / Pacific / Atlantic / Intra-Asia / Commodity) for port
+# pairs that never appeared together in the historical dataset.
+PORT_REGIONS = {
+    "Shanghai, CN": "east_asia", "Ningbo-Zhoushan, CN": "east_asia", "Shenzhen, CN": "east_asia",
+    "Hong Kong, HK": "east_asia", "Tokyo, JP": "east_asia", "Busan, KR": "east_asia",
+    "Singapore, SG": "sea_asia", "Port Klang, MY": "sea_asia", "Jakarta, ID": "sea_asia",
+    "Ho Chi Minh City, VN": "sea_asia", "Laem Chabang, TH": "sea_asia",
+    "Mumbai, IN": "south_asia", "Colombo, LK": "south_asia", "Karachi, PK": "south_asia",
+    "Jebel Ali, AE": "middle_east",
+    "Rotterdam, NL": "n_europe", "Hamburg, DE": "n_europe", "Felixstowe, UK": "n_europe",
+    "Antwerp, BE": "n_europe", "Le Havre, FR": "n_europe",
+    "Piraeus, GR": "med_europe", "Valencia, ES": "med_europe", "Algeciras, ES": "med_europe",
+    "New York, US": "us_east", "Savannah, US": "us_east",
+    "Los Angeles, US": "us_west", "Vancouver, CA": "us_west",
+    "Santos, BR": "latam", "Callao, PE": "latam",
+    "Durban, ZA": "africa", "Lagos, NG": "africa",
 }
 
 
