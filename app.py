@@ -19,6 +19,7 @@ from dl_model import score_single_shipment_dl
 from weather_api import fetch_all_ports_conditions, classify_conditions
 from historical_weather import fetch_all_ports_historical, fetch_all_ports_historical_batched, merge_historical_weather, compare_ground_truth_correlation
 from route_optimizer import build_route_graph, optimize_route, compare_priorities
+from google_maps_api import geocode_address, compute_driving_route
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -1144,18 +1145,20 @@ with tab_route:
 
     port_subset = tuple(sorted(all_ports))
 
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def _cached_graph(ports_tuple, mode, category, weather_bust):
+        weather = st.session_state.get("route_live_weather") if weather_bust else None
+        return build_route_graph(list(ports_tuple), mode, category, weather)
+
     if st.button("🧭 Optimize Route", type="primary"):
         if route_origin == route_dest:
             st.warning("Origin and destination are the same port.")
         else:
-            live_weather_data = None
             if use_live_weather:
                 with st.spinner("Fetching live conditions for weather-adjusted routing..."):
-                    live_weather_data = fetch_all_ports_conditions(CITY_COORDS)
-
-            @st.cache_data(ttl=1800, show_spinner=False)
-            def _cached_graph(ports_tuple, mode, category, weather_bust):
-                return build_route_graph(list(ports_tuple), mode, category, live_weather_data if weather_bust else None)
+                    st.session_state.route_live_weather = fetch_all_ports_conditions(CITY_COORDS)
+            else:
+                st.session_state.route_live_weather = None
 
             with st.spinner(f"Building risk-weighted graph across {len(port_subset)} ports (Dijkstra + ML edge scoring)..."):
                 G = _cached_graph(port_subset, route_mode, route_category, use_live_weather)
@@ -1229,6 +1232,53 @@ with tab_route:
             width="stretch", hide_index=True,
         )
         st.caption("Different priorities can select genuinely different routes — this is Dijkstra re-solving the graph with different edge-weight formulas, not just re-labeling the same path.")
+
+        st.markdown("---")
+        st.markdown("##### 🚚 Extend to Door-to-Door Delivery (Google Maps)")
+        st.caption(
+            "The optimizer above solves the ocean/air trunk route between ports — Google Maps has no concept of a "
+            "shipping lane, so it can't do that part. What it CAN do well is the last-mile leg: real road-network "
+            "driving distance and time from the arrival port to a final delivery address."
+        )
+
+        with st.expander("Add a last-mile delivery leg"):
+            gmaps_key = st.text_input(
+                "Google Maps API key", type="password", key="gmaps_key",
+                help="Requires a Google Cloud project with billing enabled and the 'Routes API' + 'Geocoding API' enabled for this key. Unlike Open-Meteo elsewhere in this app, Google Maps Platform is not free.",
+            )
+            delivery_address = st.text_input(
+                "Final delivery address or city", key="delivery_address",
+                placeholder=f"e.g. a warehouse address near {result['path'][-1]}",
+            )
+            add_leg = st.button("📍 Compute Last-Mile Leg")
+
+            if add_leg:
+                if not gmaps_key:
+                    st.warning("Enter a Google Maps API key above first.")
+                elif not delivery_address:
+                    st.warning("Enter a delivery address or city first.")
+                else:
+                    with st.spinner("Geocoding address..."):
+                        geo = geocode_address(delivery_address, gmaps_key)
+
+                    if not geo.get("ok"):
+                        st.error(f"Geocoding failed: {geo.get('error')}")
+                    else:
+                        st.success(f"Resolved to: {geo['formatted_address']} ({geo['lat']:.4f}, {geo['lon']:.4f})")
+                        port_coords = CITY_COORDS[result["path"][-1]]
+
+                        with st.spinner("Computing driving route via Google Routes API..."):
+                            drive = compute_driving_route(port_coords, (geo["lat"], geo["lon"]), gmaps_key)
+
+                        if not drive.get("ok"):
+                            st.error(f"Route computation failed: {drive.get('error')}")
+                        else:
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("🚚 Last-Mile Distance", f"{drive['distance_km']:.1f} km")
+                            c2.metric("⏱️ Last-Mile Drive Time", f"{drive['duration_hours']:.1f} hrs")
+                            total_distance = result["total_distance_km"] + drive["distance_km"]
+                            c3.metric("📦 Total Door-to-Door Distance", f"{total_distance:,.0f} km")
+                            st.caption(f"Full chain: {' → '.join(result['path'])} (ocean/air, ML-optimized) → {geo['formatted_address']} (road, Google Maps)")
     else:
         st.info("Choose an origin, destination, and priority above, then click **Optimize Route**.")
 
