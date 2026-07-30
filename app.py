@@ -288,13 +288,17 @@ with tab_overview:
 
 # ============================== MAP ========================================
 with tab_map:
-    st.markdown("#### 🌍 Trade Lane Risk Map")
-    st.caption("Line color = average predicted risk score on that lane · Line width = shipment volume")
+    st.markdown("#### 🌍 Global Port Network — Interactive 3D Globe")
+    st.caption("Drag to rotate, scroll to zoom, click any port for its stats. Teal ports are in the historical dataset; blue ports are tracked live but weren't part of the training data.")
     st.markdown(
-        "".join([f"<span class='risk-badge {BADGE_CLASS[t]}' style='margin-right:6px;'>{t}</span>" for t in ["Low", "Medium", "High", "Severe"]]),
+        "".join([f"<span class='risk-badge {BADGE_CLASS[t]}' style='margin-right:6px;'>{t}</span>" for t in ["Low", "Medium", "High", "Severe"]])
+        + " <span class='small-caption'>(arc colors = lane risk tier)</span>",
         unsafe_allow_html=True,
     )
     st.markdown("<br>", unsafe_allow_html=True)
+
+    from globe_view import build_globe_html
+    st.iframe(build_globe_html(fdf, height=620), height=640, width='stretch')
 
     lane_agg = (
         fdf.groupby(["Origin_City", "Destination_City"])
@@ -305,49 +309,6 @@ with tab_map:
         )
         .reset_index()
     )
-
-    fig = go.Figure()
-    max_vol = lane_agg["volume"].max() if len(lane_agg) else 1
-    for _, row in lane_agg.iterrows():
-        o = CITY_COORDS.get(row["Origin_City"])
-        d = CITY_COORDS.get(row["Destination_City"])
-        if not o or not d:
-            continue
-        score = row["avg_score"]
-        color = "#2dd4bf" if score < 20 else "#f5b942" if score < 40 else "#ff8c42" if score < 65 else "#ef4444"
-        fig.add_trace(go.Scattergeo(
-            lon=[o[1], d[1]], lat=[o[0], d[0]],
-            mode="lines",
-            line=dict(width=1.5 + 6 * row["volume"] / max_vol, color=color),
-            opacity=0.75,
-            hoverinfo="text",
-            text=f"{row['Origin_City']} → {row['Destination_City']}<br>Avg risk score: {score:.1f}<br>Delay rate: {row['delay_rate']*100:.1f}%<br>Volume: {row['volume']}",
-            showlegend=False,
-        ))
-
-    city_list = list(CITY_COORDS.keys())
-    fig.add_trace(go.Scattergeo(
-        lon=[CITY_COORDS[c][1] for c in city_list],
-        lat=[CITY_COORDS[c][0] for c in city_list],
-        mode="markers+text",
-        text=city_list, textposition="top center",
-        textfont=dict(color="#e5e7eb", size=10),
-        marker=dict(size=7, color="#e5e7eb", line=dict(width=1, color="#0b0f19")),
-        showlegend=False,
-        hoverinfo="text",
-    ))
-
-    fig.update_geos(
-        projection_type="natural earth",
-        bgcolor="#0b0f19", landcolor="#1a2236", oceancolor="#0b0f19",
-        showcountries=True, countrycolor="#232b3e", showland=True,
-        lakecolor="#0b0f19",
-    )
-    fig.update_layout(
-        template="plotly_dark", paper_bgcolor="#0b0f19",
-        height=560, margin=dict(t=10, b=10, l=0, r=0),
-    )
-    st.plotly_chart(fig, width='stretch')
 
     st.markdown("##### 🛣️ Lane Risk Summary")
     st.dataframe(
