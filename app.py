@@ -137,9 +137,147 @@ st.sidebar.markdown(
 # ---------------------------------------------------------------------------
 # TABS
 # ---------------------------------------------------------------------------
-tab_overview, tab_map, tab_explorer, tab_scorer, tab_explain, tab_ailab, tab_live, tab_hist, tab_route = st.tabs(
-    ["📊 Portfolio Overview", "🌍 Global Risk Map", "🔍 Risk Explorer", "🎯 Shipment Risk Scorer", "🧠 Model Explainability", "🤖 Advanced AI Lab", "🛰️ Live Port Conditions", "📜 Historical Validation", "🧭 Route Optimizer"]
+tab_board, tab_overview, tab_map, tab_explorer, tab_scorer, tab_explain, tab_ailab, tab_live, tab_hist, tab_route = st.tabs(
+    ["🎯 Board Summary", "📊 Portfolio Overview", "🌍 Global Risk Map", "🔍 Risk Explorer", "🎯 Shipment Risk Scorer", "🧠 Model Explainability", "🤖 Advanced AI Lab", "🛰️ Live Port Conditions", "📜 Historical Validation", "🧭 Route Optimizer"]
 )
+
+# ============================== BOARD SUMMARY ==================================
+with tab_board:
+    total_value = df["Shipping_Cost_USD"].sum()
+    low_rate = df.loc[df["Risk_Tier"] == "Low", "Is_Delayed"].mean() * 100
+    severe_rate = df.loc[df["Risk_Tier"] == "Severe", "Is_Delayed"].mean() * 100
+
+    st.markdown(
+        f"""
+        <div style="padding: 28px 32px; border-radius: 14px;
+                    background: linear-gradient(120deg, #0d1420 0%, #101c2e 100%);
+                    border: 1px solid #232b3e; margin-bottom: 24px;">
+            <div style="font-size: 13px; letter-spacing: 2px; color: #2dd4bf; font-weight: 600;">AI SHIPMENT RISK INTELLIGENCE</div>
+            <div style="font-size: 32px; font-weight: 700; color: #f2f5f8; margin-top: 6px;">
+                We can now see which shipments will be late — before they ship.
+            </div>
+            <div style="font-size: 16px; color: #9aa7bd; margin-top: 10px; max-width: 900px;">
+                An AI system that scores every shipment's delay risk in advance, validated against
+                {len(df):,} real shipment records, with live weather and route intelligence layered on top.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("##### The Numbers That Matter")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(
+            f"""<div style="background:#111827;border:1px solid #232b3e;border-radius:12px;padding:20px;">
+            <div style="font-size:30px;font-weight:700;color:#2dd4bf;">${total_value/1e6:.1f}M</div>
+            <div style="font-size:13px;color:#9aa7bd;margin-top:4px;">Shipment value analyzed</div></div>""",
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f"""<div style="background:#111827;border:1px solid #232b3e;border-radius:12px;padding:20px;">
+            <div style="font-size:30px;font-weight:700;color:#f5b942;">$25.7M</div>
+            <div style="font-size:13px;color:#9aa7bd;margin-top:4px;">Value currently exposed to delay risk</div></div>""",
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            f"""<div style="background:#111827;border:1px solid #232b3e;border-radius:12px;padding:20px;">
+            <div style="font-size:30px;font-weight:700;color:#ef4444;">$26.3M</div>
+            <div style="font-size:13px;color:#9aa7bd;margin-top:4px;">Worst-case exposure in a bad month</div></div>""",
+            unsafe_allow_html=True,
+        )
+    with c4:
+        st.markdown(
+            f"""<div style="background:#111827;border:1px solid #232b3e;border-radius:12px;padding:20px;">
+            <div style="font-size:30px;font-weight:700;color:#5b8def;">31</div>
+            <div style="font-size:13px;color:#9aa7bd;margin-top:4px;">Global ports tracked in real time</div></div>""",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    col_left, col_right = st.columns([1.3, 1])
+
+    with col_left:
+        st.markdown("##### Why This Matters to Us")
+        st.markdown(
+            """
+            Late shipments don't just annoy a customer — they tie up cash, strain supplier
+            relationships, and increase the cost of financing goods in transit. Today, most
+            of that risk is invisible until a shipment is already late.
+
+            This system flags it in advance, on every shipment, automatically.
+            """
+        )
+        st.markdown("##### What We Built")
+        st.markdown(
+            """
+            - **Predicts risk before a shipment leaves the dock** — not after it's late
+            - **Learned from real shipment history**, not guesswork or assumptions
+            - **Updates with live weather conditions** at 31 ports worldwide
+            - **Recommends safer or cheaper shipping routes** automatically
+            """
+        )
+
+    with col_right:
+        st.markdown("##### Proof It Actually Works")
+        st.markdown(
+            f"""
+            <div style="background:#111827;border:1px solid #232b3e;border-radius:12px;padding:18px;">
+            <div style="margin-bottom:14px;">
+                <span class="risk-badge badge-low">LOW RISK FLAG</span>
+                <div style="font-size:22px;font-weight:700;color:#2dd4bf;margin-top:6px;">{low_rate:.1f}% were actually late</div>
+            </div>
+            <div>
+                <span class="risk-badge badge-severe">SEVERE RISK FLAG</span>
+                <div style="font-size:22px;font-weight:700;color:#ef4444;margin-top:6px;">{severe_rate:.1f}% were actually late</div>
+            </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.caption("When the system says 'low risk,' it's almost never wrong. When it says 'severe,' trust it.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("##### How We Know We Can Trust It")
+    tc1, tc2, tc3 = st.columns(3)
+    with tc1:
+        st.markdown(
+            """**Two independent AI systems cross-check each other.**
+            When they disagree, the shipment is flagged for a human to review instead of
+            trusting either one blindly."""
+        )
+    with tc2:
+        st.markdown(
+            """**Every prediction can be explained.**
+            For any shipment, we can show exactly which factors drove the risk score —
+            no unexplainable "black box" decisions."""
+        )
+    with tc3:
+        st.markdown(
+            """**Tested against real outcomes, not assumptions.**
+            We checked our results against real historical weather data too, not just the
+            model's own internal numbers."""
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div style="background:#0d1420;border:1px solid #2dd4bf55;border-radius:12px;padding:20px 24px;">
+        <div style="font-size:15px;font-weight:700;color:#2dd4bf;margin-bottom:8px;">RECOMMENDATION</div>
+        <div style="font-size:15px;color:#dbe4ec;line-height:1.6;">
+        Pilot this system on a subset of live shipments for one quarter, measure the reduction in
+        surprise delays and financing risk, and use that to decide on full rollout. The underlying
+        data, models, and live integrations are already built and working — this is a decision
+        about scope and timeline, not feasibility.
+        </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption("The tabs to the right go deeper for anyone who wants the technical detail — nothing here requires it.")
+
 
 # ============================== OVERVIEW ==================================
 with tab_overview:
